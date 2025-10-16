@@ -108,3 +108,12 @@ client.on("messageCreate", async (msg) => {
 
 client.once("ready", () => console.log(`OCbot1 is online as ${client.user?.tag || "[unknown]"}`));
 client.login(process.env.DISCORD_TOKEN);
+
+import express from "express";
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => res.send("OCbot1 is online and running!"));
+
+app.listen(PORT, () => console.log(`✅ Dummy server running on port ${PORT}`));
