@@ -168,7 +168,7 @@ actor} gives ${target} a dramatic anime slap 😤`]};const choices=templates[act
 
 // --- Discord Message Handler ---
 client.on("messageCreate", async (msg)=>{
-  if(!msg.author || !msg.author.id) return; // Safety check
+  if(!msg.author || !msg.author.id) return;
   if(msg.author.bot) return;
   if(!msg.content.startsWith("!chat")) return;
 
@@ -176,51 +176,57 @@ client.on("messageCreate", async (msg)=>{
   if(!userMsg) return msg.reply("Try saying `!chat Hey OCbot1!` 🙂");
 
   await msg.channel.sendTyping();
-  trackPlayer(msg.author.id,msg.author.username,msg.content);
+
+  // Track the author safely
+  trackPlayer(msg.author.id, msg.author.username, msg.content);
 
   // --- Action Commands ---
   const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
   if(actionMatch){
-    const action=actionMatch[1].toLowerCase();
-    const targetId=actionMatch[2];
-    const gifFile=getActionGif(action);
+    const action = actionMatch[1].toLowerCase();
+    const targetId = actionMatch[2];
+
+    if(!targetId) return msg.reply("I couldn’t find that user to interact with 😅");
 
     let targetUser;
-    try { targetUser=await msg.client.users.fetch(targetId); } catch {
-      return msg.reply("I can't find that user 😅");
-    }
-    const targetName = targetUser.username;
+    try { targetUser = await msg.client.users.fetch(targetId); } 
+    catch { return msg.reply("I can't find that user 😅"); }
+
+    trackPlayer(targetUser.id, targetUser.username); // safe
+
+    const gifFile = getActionGif(action);
     const actorName = msg.author.username;
-    const messageText = getActionMessage(action,actorName,targetName);
+    const targetName = targetUser.username;
+    const messageText = getActionMessage(action, actorName, targetName);
 
     if(gifFile && fs.existsSync(`./${gifFile}`)){
       const attachment = new AttachmentBuilder(`./${gifFile}`);
-      return msg.reply({content:messageText,files:[attachment]});
+      return msg.reply({content: messageText, files:[attachment]});
     } else {
       return msg.reply(messageText);
     }
   }
 
   // --- Player Opinion ---
-  const mentioned=msg.mentions.users.first();
+  const mentioned = msg.mentions.users.first();
   if(mentioned && /think of|opinion|feel about/i.test(userMsg)){
-    trackPlayer(mentioned.id,mentioned.username);
-    const player=memory.players[mentioned.id];
-    const opinion=await askOpinionAboutPlayer("OCbot1",player);
+    trackPlayer(mentioned.id, mentioned.username);
+    const player = memory.players[mentioned.id];
+    const opinion = await askOpinionAboutPlayer("OCbot1", player);
     return msg.reply(opinion);
   }
 
   // --- Normal Chat ---
-  let aiReply=await askAI(userMsg);
-  if(aiReply.length>1900) aiReply=aiReply.slice(0,1900)+"...";
+  let aiReply = await askAI(userMsg);
+  if(aiReply.length > 1900) aiReply = aiReply.slice(0,1900) + "...";
 
-  const emotion=detectEmotion(aiReply);
-  const emotionFile=`./${emotion}.jpg`;
+  const emotion = detectEmotion(aiReply);
+  const emotionFile = `./${emotion}.jpg`;
 
   try{
-    const file=fs.readFileSync(emotionFile);
-    const attachment=new AttachmentBuilder(file,{name:`${emotion}.jpg`});
-    await msg.reply({content:aiReply,files:[attachment]});
+    const file = fs.readFileSync(emotionFile);
+    const attachment = new AttachmentBuilder(file,{name:`${emotion}.jpg`});
+    await msg.reply({content: aiReply, files:[attachment]});
   }catch{
     await msg.reply(aiReply);
   }
@@ -230,8 +236,8 @@ client.on("messageCreate", async (msg)=>{
 client.once("ready",()=>console.log(`✅ OCbot1 is online as ${client.user?.tag}`));
 
 // --- Dummy Web Server for Render ---
-const app=express();
-const PORT=process.env.PORT||3000;
+const app = express();
+const PORT = process.env.PORT||3000;
 app.get("/",(req,res)=>res.send("OCbot1 is running and connected to Discord!"));
 app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
