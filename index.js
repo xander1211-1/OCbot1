@@ -1,4 +1,4 @@
-// index.js - OCbot1 Final Final (Updated for single-reply commands)
+// index.js - OCbot1 (updated to avoid accidental action triggers and reduce duplicate replies)
 import fs from "fs";
 import fetch from "node-fetch";
 import express from "express";
@@ -123,12 +123,12 @@ function buildCommandsList() {
 Available actions: ${actionsLine}`;
 }
 
-// ---------- SEND ONCE / DEDUP + CACHE ----------
+// ---------- SEND ONCE / DEDUP + CACHE (IMPROVED) ----------
 const recentMessages = new Set();
-const MESSAGE_TTL_MS = Number(process.env.MESSAGE_TTL_MS || 10000);
+const MESSAGE_TTL_MS = Number(process.env.MESSAGE_TTL_MS || 20000); // default 20s
 async function hasBotRepliedToMessage(originalMsg) {
   try {
-    if (recentMessages.has(originalMsg.id)) return true;
+    if (recentMessages.has(originalMsg.id)) return true; // quick local check
     const messages = await originalMsg.channel.messages.fetch({ limit: 50 });
     for (const m of messages.values()) {
       if (m.author?.id === client.user?.id) {
@@ -140,15 +140,19 @@ async function hasBotRepliedToMessage(originalMsg) {
   return false;
 }
 async function sendOnce(originalMsg, replyOptions) {
-  const delayMs = Number(process.env.DEDUPE_DELAY_MS || 1500);
+  const delayMs = Number(process.env.DEDUPE_DELAY_MS || 3000); // default 3s
   try {
     if (await hasBotRepliedToMessage(originalMsg)) return null;
     await new Promise((r) => setTimeout(r, delayMs));
     if (await hasBotRepliedToMessage(originalMsg)) return null;
+    // mark locally as handled to stop same-instance duplicate processing after reply
     recentMessages.add(originalMsg.id);
     setTimeout(() => recentMessages.delete(originalMsg.id), MESSAGE_TTL_MS);
     return await originalMsg.reply(replyOptions);
-  } catch (e) { console.error("sendOnce failed:", e); try { return await originalMsg.reply(replyOptions); } catch (err) { console.error("Fallback reply failed:", err); return null; } }
+  } catch (e) {
+    console.error("sendOnce failed:", e);
+    try { return await originalMsg.reply(replyOptions); } catch (err) { console.error("Fallback reply failed:", err); return null; }
+  }
 }
 
 // ---------- STARTUP APPEARANCE ----------
@@ -160,10 +164,15 @@ if (!memory.appearance || !memory.appearance.description) {
   saveMemory();
 }
 
-// ---------- MESSAGE HANDLER ----------
+// ---------- MESSAGE HANDLER (immediate reservation + restricted action matching) ----------
 client.on("messageCreate", async (msg) => {
   try {
     if (!msg.author?.id || msg.author.bot || !msg.content) return;
+
+    // immediate per-process reservation to avoid double-processing inside same instance
+    if (recentMessages.has(msg.id)) return;
+    recentMessages.add(msg.id);
+    setTimeout(() => recentMessages.delete(msg.id), MESSAGE_TTL_MS);
 
     const content = msg.content.trim();
     const lc = content.toLowerCase();
@@ -201,6 +210,9 @@ client.on("messageCreate", async (msg) => {
     }
 
     // ---------- CHAT / ACTIONS ----------
+    // Only proceed if message explicitly uses the bot command prefixes (avoids accidental triggers)
+    if (!(lc.startsWith("!chat") || lc.startsWith("!hi"))) return;
+
     let userMsg = content.replace(/^!chat\s*/i,"").replace(/^!hi\s*/i,"").trim();
     if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
 
@@ -213,8 +225,9 @@ client.on("messageCreate", async (msg) => {
     // Send typing indicator
     await msg.channel.sendTyping();
 
-    // ---------- ACTION MATCH ----------
-    const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s*(<@!?\d+>)?/i) || userMsg.match(/^(\w+)\s*(<@!?\d+>)?/i);
+    // ---------- ACTION MATCH: only explicit "ocbot1 <action>" at start ----------
+    // require the token "ocbot1" at the start of the chat content for actions
+    const actionMatch = userMsg.match(/^ocbot1\s+([a-zA-Z]+)\s*(<@!?\d+>)?/i);
     const actionMap = detectGifsByAction();
     if (actionMatch) {
       const action = actionMatch[1]?.toLowerCase();
@@ -286,3 +299,4 @@ app.listen(EXPRESS_PORT, ()=>console.log(`🌐 Express listening on port ${EXPRE
 
 // ---------- LOGIN ----------
 client.login(DISCORD_TOKEN).catch(e=>console.error("Failed to login:", e));
+    
