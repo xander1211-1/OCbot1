@@ -163,7 +163,8 @@ client.on("messageCreate", async msg=>{
     const messageText = getActionMessage(action, msg.author.username, targetUser?.username||"someone");
     if(gifFile && fs.existsSync(`./${gifFile}`)){
       return msg.reply({content:messageText, files:[new AttachmentBuilder(`./${gifFile}`)]});
-    } else return msg.reply(messageText);
+    } 
+    return msg.reply(messageText);
   }
 
   // --- Player Opinion ---
@@ -175,7 +176,7 @@ client.on("messageCreate", async msg=>{
     const player = targetUser ? memory.players[String(targetUser.id)] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
-    return msg.reply(opinion);
+    return msg.reply(opinion); // <-- return prevents double message
   }
 
   // --- Normal Chat ---
@@ -186,9 +187,9 @@ client.on("messageCreate", async msg=>{
   const emotionFile = `./${emotion}.jpg`;
   try{
     const file = fs.readFileSync(emotionFile);
-    await msg.reply({content:aiReply, files:[new AttachmentBuilder(file,{name:`${emotion}.jpg`})]});
+    return msg.reply({content:aiReply, files:[new AttachmentBuilder(file,{name:`${emotion}.jpg`})]});
   }catch{
-    await msg.reply(aiReply);
+    return msg.reply(aiReply);
   }
 });
 
