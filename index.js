@@ -24,7 +24,7 @@ const MEMORY_FILE = "./memory.json";
 if (!process.env.DISCORD_TOKEN) console.error("⚠️ DISCORD_TOKEN missing!");
 if (!OPENROUTER_KEY) console.error("⚠️ OPENROUTER_API_KEY missing!");
 
-// --- Robust Memory Load & Safe Tracking ---
+// --- Memory Load & Safe Tracking ---
 let memory = { messages: [], players: {} };
 try {
   if (fs.existsSync(MEMORY_FILE)) {
@@ -55,7 +55,7 @@ function saveMemory() {
 
 function safeTrackPlayer(id, username, message = "") {
   if (!id || !username) return;
-  const idStr = String(id); // force ID to string
+  const idStr = String(id);
   if (!memory.players[idStr]) memory.players[idStr] = { name: username, interactions: 0, messages: [] };
   else memory.players[idStr].name = username;
   const p = memory.players[idStr];
@@ -139,9 +139,15 @@ function getActionMessage(action, actor, target){ const templates = {
   slap:[`${actor} slaps ${target} 😳`]
 }; const choices = templates[action] || [`${actor} interacts with ${target}.`]; return choices[Math.floor(Math.random()*choices.length)]; }
 
+// --- Message Deduplication ---
+const repliedMessages = new Set();
+
 // --- Discord Message Handler ---
 client.on("messageCreate", async msg=>{
   if(!msg.author?.id || msg.author.bot) return;
+  if(repliedMessages.has(msg.id)) return; // Already replied
+  repliedMessages.add(msg.id); // Mark message as handled
+
   if(!msg.content.startsWith("!chat") && !msg.content.startsWith("!hi")) return;
 
   const userMsg = msg.content.replace(/!chat|!hi/i,"").trim();
@@ -176,7 +182,7 @@ client.on("messageCreate", async msg=>{
     const player = targetUser ? memory.players[String(targetUser.id)] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
-    return msg.reply(opinion); // <-- return prevents double message
+    return msg.reply(opinion);
   }
 
   // --- Normal Chat ---
@@ -204,3 +210,4 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:",err));
+                         
