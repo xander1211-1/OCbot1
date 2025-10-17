@@ -39,7 +39,7 @@ function saveMemory() {
 }
 
 // ---------- TRACKING ----------
-function safeTrackPlayer(id, username, message = "") {
+function trackPlayer(id, username, message = "") {
   if (!id || !username) return;
   if (!memory.players[id]) memory.players[id] = { name: username, interactions: 0, messages: [] };
   const p = memory.players[id];
@@ -97,11 +97,20 @@ async function askAI(userMsg, isCreator = false) {
       headers: { "Authorization": `Bearer ${OPENROUTER_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: MODEL, messages }),
     });
-    const data = await res.json().catch(() => null);
-    const reply = data?.choices?.[0]?.message?.content || "Uhh, my brain blanked out 😅";
+
+    if (!res.ok) {
+      console.error("API call failed:", await res.text());
+      return "Hmm… something went wrong 😖";
+    }
+
+    const data = await res.json();
+    const reply = data?.choices?.[0]?.message?.content;
+    if (!reply) return "Hmm… something went wrong 😖";
+
     memory.messages.push({ user: userMsg, bot: reply });
     if (memory.messages.length > 300) memory.messages = memory.messages.slice(-300);
     saveMemory();
+
     return reply;
   } catch (e) {
     console.error("askAI error:", e);
@@ -158,6 +167,7 @@ client.on("messageCreate", async (msg) => {
     if (!msg.author?.id || msg.author.bot || !msg.content) return;
 
     const lc = msg.content.toLowerCase().trim();
+    let replyOptions = null;
 
     // ---------- ACTIONS ----------
     const actionMatch = msg.content.match(/^!chat\s*ocbot1\s+([a-zA-Z]+)\s*(<@!?\d+>)?/i)
@@ -166,8 +176,6 @@ client.on("messageCreate", async (msg) => {
     if (actionMatch) {
       const action = actionMatch[1]?.toLowerCase();
       if (action && actionMap[action]) {
-        if (await hasBotRepliedToMessage(msg)) return;
-
         let targetUser = null;
         if (actionMatch[2]) {
           const idMatch = actionMatch[2].match(/\d+/);
@@ -189,57 +197,58 @@ client.on("messageCreate", async (msg) => {
 
         if (pick && fs.existsSync(`./${pick}`)) {
           const buf = fs.readFileSync(`./${pick}`);
-          return await sendOnce(msg, { content: text, files: [new AttachmentBuilder(buf, { name: pick })] });
-        } else return await sendOnce(msg, { content: text });
+          replyOptions = { content: text, files: [new AttachmentBuilder(buf, { name: pick })] };
+        } else replyOptions = { content: text };
       }
     }
 
     // ---------- COMMANDS ----------
-    if (lc.startsWith("!commands")) return await sendOnce(msg, { content: buildCommandsList() });
-    if (lc.startsWith("!memory")) {
+    else if (lc.startsWith("!commands")) replyOptions = { content: buildCommandsList() };
+    else if (lc.startsWith("!memory")) {
       const playerCount = Object.keys(memory.players).length;
       const top = Object.entries(memory.players).sort((a,b)=> (b[1].interactions||0)-(a[1].interactions||0))
         .slice(0,5).map(([id,p])=> `${p.name} (${p.interactions||0})`);
-      return await sendOnce(msg, { content: `Memory: ${playerCount} players stored.\nTop interactions: ${top.join(", ") || "none"}\nAppearance: ${memory.appearance.description}` });
+      replyOptions = { content: `Memory: ${playerCount} players stored.\nTop interactions: ${top.join(", ") || "none"}\nAppearance: ${memory.appearance.description}` };
     }
-    if (lc.startsWith("!emotion")) {
+    else if (lc.startsWith("!emotion")) {
       const parts = msg.content.split(/\s+/);
-      if (parts.length < 2) return await sendOnce(msg, { content: "Usage: !emotion <name>" });
-      const want = parts[1].toLowerCase();
-      const emotions = detectEmotionImages();
-      const pick = emotions.find(e=>e.toLowerCase().includes(want));
-      if (!pick) return await sendOnce(msg, { content: `No emotion image matching "${want}" found.` });
-      try { const buf = fs.readFileSync(`./${pick}`); return await sendOnce(msg, { files: [new AttachmentBuilder(buf, { name: pick })] }); }
-      catch { return await sendOnce(msg, { content: "Could not send that emotion file." }); }
+      if (parts.length < 2) replyOptions = { content: "Usage: !emotion <name>" };
+      else {
+        const want = parts[1].toLowerCase();
+        const emotions = detectEmotionImages();
+        const pick = emotions.find(e=>e.toLowerCase().includes(want));
+        if (!pick) replyOptions = { content: `No emotion image matching "${want}" found.` };
+        else {
+          const buf = fs.readFileSync(`./${pick}`);
+          replyOptions = { files: [new AttachmentBuilder(buf, { name: pick })] };
+        }
+      }
     }
 
     // ---------- CHAT ----------
-    if (!(lc.startsWith("!chat") || lc.startsWith("!hi"))) return;
+    else if (lc.startsWith("!chat") || lc.startsWith("!hi")) {
+      let userMsg = msg.content.replace(/^!chat\s*/i,"").replace(/^!hi\s*/i,"").trim();
+      if (!userMsg) userMsg = "Hey!";
+      const isCreator = msg.author.id === CREATOR_ID;
+      if (isCreator) userMsg = "[CREATOR] " + userMsg;
 
-    let userMsg = msg.content.replace(/^!chat\s*/i,"").replace(/^!hi\s*/i,"").trim();
-    if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
+      trackPlayer(msg.author.id, msg.author.username, msg.content);
+      await msg.channel.sendTyping();
+      const aiReply = await askAI(userMsg, isCreator);
+      const replyText = aiReply.length > 1900 ? aiReply.slice(0,1900)+"..." : aiReply;
 
-    const isCreator = msg.author.id === CREATOR_ID;
-    if (isCreator) userMsg = "[CREATOR] " + userMsg;
+      const emotion = detectEmotionFromText(replyText);
+      const emotions = detectEmotionImages();
+      let pick = emotions.find(e=>e.toLowerCase().includes(emotion));
+      if (!pick && emotions.length) pick = emotions[Math.floor(Math.random()*emotions.length)];
 
-    if (await hasBotRepliedToMessage(msg)) return;
+      if (pick && fs.existsSync(`./${pick}`)) {
+        const buf = fs.readFileSync(`./${pick}`);
+        replyOptions = { content: replyText, files: [new AttachmentBuilder(buf, { name: pick })] };
+      } else replyOptions = { content: replyText };
+    }
 
-    safeTrackPlayer(msg.author.id, msg.author.username, msg.content);
-    await msg.channel.sendTyping();
-
-    const aiReply = await askAI(userMsg, isCreator);
-    const replyText = aiReply.length > 1900 ? aiReply.slice(0,1900)+"..." : aiReply;
-
-    const emotion = detectEmotionFromText(replyText);
-    const emotions = detectEmotionImages();
-    let pick = emotions.find(e=>e.toLowerCase().includes(emotion));
-    if (!pick && emotions.length) pick = emotions[Math.floor(Math.random()*emotions.length)];
-
-    if (pick && fs.existsSync(`./${pick}`)) {
-      const buf = fs.readFileSync(`./${pick}`);
-      return await sendOnce(msg, { content: replyText, files: [new AttachmentBuilder(buf, { name: pick })] });
-    } else return await sendOnce(msg, { content: replyText });
-
+    if (replyOptions) await sendOnce(msg, replyOptions);
   } catch (err) { console.error("messageCreate handler error:", err); }
 });
 
