@@ -40,17 +40,18 @@ function saveMemory() {
 // --- Safe Track Player ---
 function safeTrackPlayer(id, username, message = "") {
   if (!id || !username) return;
-  if (!memory.players[id]) memory.players[id] = { name: username, interactions: 0, messages: [] };
-  const p = memory.players[id];
+  const idStr = String(id); // Force ID to string
+  if (!memory.players[idStr]) memory.players[idStr] = { name: username, interactions: 0, messages: [] };
+  const p = memory.players[idStr];
   p.interactions++;
   if (message) p.messages.push(message);
   if (p.messages.length > 50) p.messages = p.messages.slice(-50);
   saveMemory();
 }
 
-// --- Absolute Safe Wrapper: trackUser ---
+// --- Absolute Safe Wrapper ---
 function trackUser(id, username, message = "") {
-  if (typeof id !== "string" || !id || typeof username !== "string" || !username) {
+  if (!id || !username) {
     console.warn("Skipping safeTrackPlayer: invalid id/username", { id, username });
     return;
   }
@@ -162,7 +163,7 @@ client.on("messageCreate", async msg=>{
     let targetUser;
     try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
     if(targetUser) trackUser(targetUser.id, targetUser.username);
-    const player = targetUser ? memory.players[targetUser.id] : null;
+    const player = targetUser ? memory.players[String(targetUser.id)] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
     return msg.reply(opinion);
@@ -193,4 +194,4 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:",err));
-  
+                                   
