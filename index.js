@@ -1,57 +1,60 @@
+// index.js - OCbot1 (final)
+// Requirements: node 18+, discord.js v14, node-fetch, express
 import fs from "fs";
 import fetch from "node-fetch";
 import express from "express";
-import { Client, GatewayIntentBits, AttachmentBuilder } from "discord.js";
+import { Client, GatewayIntentBits, AttachmentBuilder, ActivityType } from "discord.js";
 
-// --- Global Error Handlers ---
+// ---------- CONFIG ----------
+const CREATOR_ID = "1167751946577379339"; // Xander (creator)
+const MODEL = "tngtech/deepseek-r1t2-chimera:free";
+const MEMORY_FILE = "./memory.json";
+const EXPRESS_PORT = 10000; // Render requires a bound port
+
+// ---------- ENV CHECK ----------
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
+if (!DISCORD_TOKEN) console.error("⚠️ DISCORD_TOKEN missing!");
+if (!OPENROUTER_KEY) console.error("⚠️ OPENROUTER_API_KEY missing!");
+
+// ---------- CLIENT ----------
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+});
+
+// ---------- GLOBAL ERROR HANDLING ----------
 process.on("unhandledRejection", (err) => console.error("Unhandled promise rejection:", err));
 process.on("uncaughtException", (err) => console.error("Uncaught exception:", err));
 
-// --- Discord Client ---
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
-
-// --- Creator ID ---
-const CREATOR_ID = "1167751946577379339"; // Your Discord ID
-
-// --- Environment Variables ---
-const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
-const MODEL = "tngtech/deepseek-r1t2-chimera:free";
-const MEMORY_FILE = "./memory.json";
-
-if (!process.env.DISCORD_TOKEN) console.error("⚠️ DISCORD_TOKEN missing!");
-if (!OPENROUTER_KEY) console.error("⚠️ OPENROUTER_API_KEY missing!");
-
-// --- Memory Load & Safe Tracking ---
-let memory = { messages: [], players: {} };
+// ---------- MEMORY LOADING ----------
+let memory = { messages: [], players: {}, appearance: { description: "", notes: "" } };
 try {
   if (fs.existsSync(MEMORY_FILE)) {
     const raw = fs.readFileSync(MEMORY_FILE, "utf8");
     const parsed = raw ? JSON.parse(raw) : null;
     if (parsed && typeof parsed === "object") memory = parsed;
   }
-} catch (err) {
-  console.error("Failed to read/parse memory.json — starting fresh. Error:", err);
-  memory = { messages: [], players: {} };
+} catch (e) {
+  console.error("Error reading memory.json, starting fresh:", e);
+  memory = { messages: [], players: {}, appearance: { description: "", notes: "" } };
 }
-
-if (!memory || typeof memory !== "object") memory = { messages: [], players: {} };
+// Ensure valid shapes
 if (!Array.isArray(memory.messages)) memory.messages = [];
 if (!memory.players || typeof memory.players !== "object") memory.players = {};
+if (!memory.appearance || typeof memory.appearance !== "object") memory.appearance = { description: "", notes: "" };
 
 function saveMemory() {
   try {
+    if (!memory || typeof memory !== "object") memory = { messages: [], players: {}, appearance: { description: "", notes: "" } };
+    if (!Array.isArray(memory.messages)) memory.messages = [];
+    if (!memory.players || typeof memory.players !== "object") memory.players = {};
     fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
-  } catch (err) {
-    console.error("Failed to save memory.json:", err);
+  } catch (e) {
+    console.error("Failed to save memory.json:", e);
   }
 }
 
+// ---------- TRACKING / MEMORY HELPERS ----------
 function safeTrackPlayer(id, username, message = "") {
   if (!id || !username) return;
   const idStr = String(id);
@@ -60,17 +63,43 @@ function safeTrackPlayer(id, username, message = "") {
   const p = memory.players[idStr];
   p.interactions = (p.interactions || 0) + 1;
   if (message) p.messages.push(message);
-  if (p.messages.length > 50) p.messages = p.messages.slice(-50);
+  if (p.messages.length > 30) p.messages = p.messages.slice(-30); // keep recent 20-30 messages per user
   saveMemory();
 }
+function trackUser(id, username, message = "") { if (!id || !username) return; safeTrackPlayer(String(id), username, message); }
 
-function trackUser(id, username, message = "") {
-  if (!id || !username) return;
-  safeTrackPlayer(String(id), username, message);
+// ---------- FILE AUTO-DETECT HELPERS ----------
+function listRepoFiles() {
+  try {
+    return fs.readdirSync("./").filter((f) => fs.statSync(f).isFile());
+  } catch (e) {
+    console.error("Failed to read repo root:", e);
+    return [];
+  }
+}
+function detectEmotionImages() {
+  const files = listRepoFiles();
+  return files.filter((f) => f.toLowerCase().endsWith(".jpg") || f.toLowerCase().endsWith(".jpeg"));
+}
+function detectGifsByAction() {
+  // Returns map: action -> [file1.gif,...]
+  const files = listRepoFiles();
+  const gifs = files.filter((f) => f.toLowerCase().endsWith(".gif"));
+  const map = {};
+  for (const g of gifs) {
+    // derive action name: take leading letters before first digit or underscore, e.g. hug1.gif -> 'hug'
+    const name = g.split(".gif")[0];
+    // normalize: remove trailing digits and non-alpha
+    const action = name.replace(/[_\-\s]+/g, "").replace(/\d+$/, "").toLowerCase();
+    if (!action) continue;
+    if (!map[action]) map[action] = [];
+    map[action].push(g);
+  }
+  return map;
 }
 
-// --- Emotion Detection ---
-function detectEmotion(text) {
+// ---------- EMOTION DETECTION (text) ----------
+function detectEmotionFromText(text) {
   const t = (text || "").toLowerCase();
   if (t.match(/\b(happy|yay|love|good|excited|cute|sweet)\b/)) return "happy";
   if (t.match(/\b(sad|cry|unhappy|lonely|sorry|bad|tear)\b/)) return "sad";
@@ -78,9 +107,12 @@ function detectEmotion(text) {
   return "neutral";
 }
 
-// --- AI Chat ---
+// ---------- OPENROUTER / MODEL ASK ----------
 async function askAI(userMsg, isCreator = false) {
-  const messages = [{ role: "system", content: `You are OCbot1, a gyaru tomboy anime girl. Playful, teasing, confident, SFW. ${isCreator ? "You know this user is your creator and treat them specially." : ""}` }];
+  const system = isCreator
+    ? "You are OCbot1, a tomboyish gyaru anime girl. Playful, teasing, confident. Treat this user as your creator (respectful & slightly affectionate). Keep content SFW."
+    : "You are OCbot1, a tomboyish gyaru anime girl. Playful, teasing, confident, SFW.";
+  const messages = [{ role: "system", content: system }];
   const recent = memory.messages.slice(-300);
   for (const m of recent) { messages.push({ role: "user", content: m.user }); messages.push({ role: "assistant", content: m.bot }); }
   messages.push({ role: "user", content: userMsg });
@@ -97,23 +129,16 @@ async function askAI(userMsg, isCreator = false) {
     if (memory.messages.length > 300) memory.messages = memory.messages.slice(-300);
     saveMemory();
     return reply;
-  } catch (err) {
-    console.error("Error fetching AI response:", err);
+  } catch (e) {
+    console.error("askAI error:", e);
     return "Hmm… something went wrong 😖";
   }
 }
 
-// --- AI Opinion ---
+// ---------- OPINION (about a player) ----------
 async function askOpinion(botName, player, isCreatorMentioned = false) {
-  const history = (player && player.messages) ? player.messages.join("\n") : "No past messages yet.";
-  const prompt = `
-You are ${botName}, a gyaru tomboy anime girl.
-${isCreatorMentioned ? "This is about your creator." : ""}
-Someone asked what you think of ${player?.name || "them"}.
-Form an opinion based on this chat history, sassy/flirty but SFW, under 3 sentences.
-Chat history:
-${history}
-`;
+  const history = player && player.messages ? player.messages.join("\n") : "No past messages yet.";
+  const prompt = `${isCreatorMentioned ? "[ABOUT CREATOR] " : ""}You are ${botName}, a tomboyish gyaru anime girl. Someone asked what you think of ${player?.name || "them"}. Form a sassy, playful, SFW opinion in 1-3 sentences. History:\n${history}`;
   try {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -122,24 +147,13 @@ ${history}
     });
     const data = await res.json().catch(() => null);
     return data?.choices?.[0]?.message?.content || `Hmm… I don’t know much about ${player?.name || "them"} 😅`;
-  } catch (err) {
-    console.error("Error fetching opinion:", err);
+  } catch (e) {
+    console.error("askOpinion error:", e);
     return "Hmm… couldn’t think of an opinion 😖";
   }
 }
 
-// --- Action GIFs ---
-const actionGifs = { nom:["nom1.gif","nom2.gif"], hug:["hug1.gif","hug2.gif"], pat:["pat1.gif"], kiss:["kiss1.gif"], slap:["slap1.gif"] };
-function getActionGif(action){ const gifs = actionGifs[action]; if(!gifs) return null; return gifs[Math.floor(Math.random()*gifs.length)]; }
-function getActionMessage(action, actor, target){ const templates = {
-  nom:[`${actor} noms on ${target} 🍴`,`${actor} bites ${target} playfully 😋`],
-  hug:[`${actor} hugs ${target} 💖`,`${actor} wraps ${target} in a warm hug 🤗`],
-  pat:[`${actor} pats ${target} 🥰`],
-  kiss:[`${actor} kisses ${target} 😘`],
-  slap:[`${actor} slaps ${target} 😳`]
-}; const choices = templates[action] || [`${actor} interacts with ${target}.`]; return choices[Math.floor(Math.random()*choices.length)]; }
-
-// --- Dedup helpers ---
+// ---------- DEDUP + RACE-SAFE SENDER ----------
 async function hasBotRepliedToMessage(originalMsg) {
   try {
     const messages = await originalMsg.channel.messages.fetch({ limit: 50 });
@@ -155,71 +169,190 @@ async function hasBotRepliedToMessage(originalMsg) {
 async function sendOnce(originalMsg, replyOptions) {
   try {
     if (await hasBotRepliedToMessage(originalMsg)) return null;
-    await new Promise(res=>setTimeout(res,250));
+    await new Promise((r) => setTimeout(r, 300)); // small delay to avoid races
     if (await hasBotRepliedToMessage(originalMsg)) return null;
     return await originalMsg.reply(replyOptions);
-  } catch (e) { console.error("sendOnce failed:", e); try { return await originalMsg.reply(replyOptions); } catch { return null; } }
+  } catch (e) {
+    console.error("sendOnce failed:", e);
+    try { return await originalMsg.reply(replyOptions); } catch (err) { console.error("Fallback reply failed:", err); return null; }
+  }
 }
 
-// --- Discord Message Handler ---
-client.on("messageCreate", async (msg)=>{
-  if (!msg.author?.id || msg.author.bot) return;
-  if (!msg.content.startsWith("!chat") && !msg.content.startsWith("!hi")) return;
+// ---------- UTILITY: build commands listing ----------
+function buildCommandsList() {
+  const actionMap = detectGifsByAction();
+  const actionNames = Object.keys(actionMap).sort();
+  const actionsLine = actionNames.length ? actionNames.join(", ") : "No actions uploaded yet";
+  return `💬 OCbot1 Commands:
+!chat OCbot1 <message> — Talk with OCbot1
+!chat OCbot1 <action> @user — Perform an action (auto-detected from GIFs)
+!emotion <emotion> — Send a specific emotion image (by name)
+!memory — Show memory usage and top players
+!commands — Show this list
 
-  let userMsg = msg.content.replace(/!chat|!hi/i, "").trim();
-  if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
+Available actions: ${actionsLine}`;
+}
 
-  const isCreator = msg.author.id === CREATOR_ID;
-  if (isCreator) userMsg = "[CREATOR] " + userMsg;
+// ---------- STARTUP: set appearance into memory if absent ----------
+if (!memory.appearance || !memory.appearance.description) {
+  memory.appearance = {
+    description: "Short blonde hair, pink eyes, tanned skin, curvy body, wears a black cap and an oversized black hoodie.",
+    notes: "Tomboyish, teasing, confident voice; loyal to creator (Xander)."
+  };
+  saveMemory();
+}
 
-  await msg.channel.sendTyping();
-  trackUser(msg.author.id, msg.author.username, msg.content);
+// ---------- MESSAGE HANDLER ----------
+client.on("messageCreate", async (msg) => {
+  try {
+    if (!msg.author?.id || msg.author.bot) return;
+    if (!msg.content) return;
+    const content = msg.content.trim();
+    // commands accepted: !chat ... or !commands or !emotion or !memory
+    const lc = content.toLowerCase();
+    if (!(lc.startsWith("!chat") || lc.startsWith("!hi") || lc.startsWith("!commands") || lc.startsWith("!emotion") || lc.startsWith("!memory"))) return;
 
-  // --- Action Commands ---
-  const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
-  if (actionMatch) {
-    const action = actionMatch[1]?.toLowerCase();
-    const targetId = actionMatch[2];
-    let targetUser = null;
-    try { targetUser = await msg.client.users.fetch(targetId); } catch {}
-    if (targetUser) trackUser(targetUser.id, targetUser.username);
+    // dynamic command: !commands
+    if (lc.startsWith("!commands")) {
+      return await sendOnce(msg, { content: buildCommandsList() });
+    }
 
-    const gifFile = getActionGif(action);
-    const messageText = getActionMessage(action, msg.author.username, targetUser?.username || "someone");
-    if (gifFile && fs.existsSync(`./${gifFile}`)) return await sendOnce(msg, { content: messageText, files: [new AttachmentBuilder(`./${gifFile}`)] });
-    return await sendOnce(msg, { content: messageText });
+    // !memory -> report memory stats
+    if (lc.startsWith("!memory")) {
+      const playerCount = Object.keys(memory.players).length;
+      const top = Object.entries(memory.players).sort((a,b)=> (b[1].interactions||0)-(a[1].interactions||0)).slice(0,5).map(([id,p])=>`${p.name} (${p.interactions||0})`);
+      const lines = [`Memory: ${playerCount} players stored.`, `Top interactions: ${top.join(", ") || "none"}`, `Appearance: ${memory.appearance.description}`];
+      return await sendOnce(msg, { content: lines.join("\n") });
+    }
+
+    // !emotion name -> send specific emotion
+    if (lc.startsWith("!emotion")) {
+      const parts = content.split(/\s+/);
+      if (parts.length < 2) return await sendOnce(msg, { content: "Usage: !emotion <name> — e.g. !emotion happy" });
+      const want = parts[1].toLowerCase();
+      const emotions = detectEmotionImages();
+      const pick = emotions.find(e => e.toLowerCase().includes(want));
+      if (!pick) return await sendOnce(msg, { content: `No emotion image matching "${want}" found.` });
+      try {
+        const buf = fs.readFileSync(`./${pick}`);
+        return await sendOnce(msg, { files: [new AttachmentBuilder(buf, { name: pick })] });
+      } catch (e) {
+        console.error("sending emotion failed:", e);
+        return await sendOnce(msg, { content: "Could not send that emotion file." });
+      }
+    }
+
+    // else: !chat / !hi
+    // strip prefix
+    let userMsg = content.replace(/^!chat\s*/i, "").replace(/^!hi\s*/i, "").trim();
+    if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
+
+    const isCreator = msg.author.id === CREATOR_ID;
+    if (isCreator) {
+      // small tagging for AI context
+      userMsg = "[CREATOR] " + userMsg;
+    }
+
+    await msg.channel.sendTyping();
+    trackUser(msg.author.id, msg.author.username, msg.content);
+
+    // action pattern: !chat OCbot1 <action> @user  OR !chat OCbot1 dance
+    // We'll accept "ocbot1" token optionally present
+    const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s*(<@!?\d+>)?/i) || userMsg.match(/^(\w+)\s*(<@!?\d+>)?/i);
+    const actionMap = detectGifsByAction();
+
+    if (actionMatch) {
+      const action = actionMatch[1]?.toLowerCase();
+      const mentionRaw = actionMatch[2];
+      // if action exists in detected map -> perform action
+      if (action && actionMap[action]) {
+        // resolve mention (if any)
+        let targetUser = null;
+        if (mentionRaw) {
+          const idMatch = mentionRaw.match(/\d+/);
+          if (idMatch) {
+            try { targetUser = await msg.client.users.fetch(idMatch[0]); } catch {}
+            if (targetUser) trackUser(targetUser.id, targetUser.username);
+          }
+        }
+        // form message text variations (tomboyish)
+        const actor = isCreator ? "Boss" : msg.author.username;
+        const targetName = targetUser ? targetUser.username : "someone";
+        const templates = [
+          `${actor} does a move on ${targetName}!`,
+          `Heh, lemme at 'em — ${actor} -> ${targetName}!`,
+          `${actor} shows no mercy to ${targetName} 😏`
+        ];
+        const messageText = templates[Math.floor(Math.random()*templates.length)];
+        const gifs = actionMap[action];
+        const pick = gifs[Math.floor(Math.random()*gifs.length)];
+        if (pick && fs.existsSync(`./${pick}`)) {
+          try {
+            const buf = fs.readFileSync(`./${pick}`);
+            return await sendOnce(msg, { content: messageText, files: [new AttachmentBuilder(buf, { name: pick })] });
+          } catch (e) {
+            console.error("send action gif failed:", e);
+            return await sendOnce(msg, { content: messageText });
+          }
+        } else {
+          return await sendOnce(msg, { content: messageText });
+        }
+      }
+      // if action word present but no gifs for it, continue to normal chat below
+    }
+
+    // Normal chat flow
+    const aiReply = await askAI(userMsg, isCreator).catch((e) => { console.error("AI error:", e); return "Hmm… something went wrong 😖"; });
+    const replyText = aiReply.length > 1900 ? aiReply.slice(0,1900) + "..." : aiReply;
+
+    // emotion jpg selection
+    const emotion = detectEmotionFromText(replyText);
+    const emotions = detectEmotionImages();
+    // try to find a jpg that includes the emotion name
+    let pick = emotions.find(e => e.toLowerCase().includes(emotion));
+    if (!pick && emotions.length) pick = emotions[Math.floor(Math.random()*emotions.length)]; // fallback random
+    if (pick && fs.existsSync(`./${pick}`)) {
+      try {
+        const buf = fs.readFileSync(`./${pick}`);
+        return await sendOnce(msg, { content: replyText, files: [new AttachmentBuilder(buf, { name: pick })] });
+      } catch (e) {
+        console.error("send emotion image failed:", e);
+        return await sendOnce(msg, { content: replyText });
+      }
+    } else {
+      return await sendOnce(msg, { content: replyText });
+    }
+  } catch (err) {
+    console.error("messageCreate handler error:", err);
   }
-
-  // --- Player Opinion ---
-  const mentioned = msg.mentions.users.first();
-  if (mentioned && /think of|opinion|feel about/i.test(userMsg)) {
-    const isCreatorMentioned = mentioned.id === CREATOR_ID;
-    let targetUser = null;
-    try { targetUser = await msg.client.users.fetch(mentioned.id); } catch {}
-    if (targetUser) trackUser(targetUser.id, targetUser.username);
-    const player = targetUser ? memory.players[String(targetUser.id)] : null;
-    if (!player) return await sendOnce(msg, { content: "I don’t know that player yet 😅" });
-    const opinion = await askOpinion("OCbot1", player, isCreatorMentioned);
-    return await sendOnce(msg, { content: opinion });
-  }
-
-  // --- Normal Chat ---
-  const aiReply = await askAI(userMsg, isCreator).catch(()=> "Hmm… something went wrong 😖");
-  const replyText = (aiReply.length > 1900) ? aiReply.slice(0,1900)+"..." : aiReply;
-  const emotion = detectEmotion(replyText);
-  const emotionFile = `./${emotion}.jpg`;
-  if (fs.existsSync(emotionFile)) return await sendOnce(msg, { content: replyText, files: [new AttachmentBuilder(fs.readFileSync(emotionFile), { name: `${emotion}.jpg` })] });
-  return await sendOnce(msg, { content: replyText });
 });
 
-// --- Ready Event ---
-client.once("ready", ()=> console.log(`✅ OCbot1 is online as ${client.user?.tag} (pid=${process.pid})`));
+// ---------- READY: presence + optional channel startup message ----------
+client.once("ready", async () => {
+  console.log(`✅ OCbot1 is online as ${client.user?.tag} (pid=${process.pid})`);
+  try {
+    // set presence
+    client.user.setActivity("with anime vibes", { type: ActivityType.Playing });
 
-// --- Dummy Web Server for Render ---
+    // send a startup message to each guild's system channel if available
+    const startupMsg = "Yo! OCbot1's up and ready to cause some chaos 😎";
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        if (guild.systemChannel) {
+          await guild.systemChannel.send(startupMsg).catch(() => {});
+        }
+      } catch (e) {}
+    }
+  } catch (e) {
+    console.error("ready hook error:", e);
+  }
+});
+
+// ---------- EXPRESS (Render) ----------
 const app = express();
-const PORT = process.env.PORT || 3000;
-app.get("/", (req,res)=>res.send("OCbot1 is running!"));
-app.listen(PORT, ()=>console.log(`🌐 Web server active on port ${PORT}`));
+app.get("/", (req, res) => res.send("OCbot1 is running."));
+app.listen(EXPRESS_PORT, () => console.log(`🌐 Express listening on port ${EXPRESS_PORT}`));
 
-// --- Start Bot ---
-client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:", err));
+// ---------- LOGIN ----------
+client.login(DISCORD_TOKEN).catch((e) => console.error("Failed to login:", e));
+    
