@@ -42,8 +42,13 @@ function saveMemory() {
   }
 }
 
-// --- Track Players ---
+// --- Track Players (Safe Version) ---
 function trackPlayer(id, name, message = "") {
+  if (!id || !name) {
+    console.warn("trackPlayer called with missing id or name:", { id, name });
+    return;
+  }
+
   if (!memory.players[id]) {
     memory.players[id] = {
       name,
@@ -51,10 +56,13 @@ function trackPlayer(id, name, message = "") {
       messages: [],
     };
   }
+
   const p = memory.players[id];
   p.interactions++;
   if (message) p.messages.push(message);
+
   if (p.messages.length > 50) p.messages = p.messages.slice(-50);
+
   saveMemory();
 }
 
@@ -160,6 +168,7 @@ actor} gives ${target} a dramatic anime slap 😤`]};const choices=templates[act
 
 // --- Discord Message Handler ---
 client.on("messageCreate", async (msg)=>{
+  if(!msg.author || !msg.author.id) return; // Safety check
   if(msg.author.bot) return;
   if(!msg.content.startsWith("!chat")) return;
 
@@ -176,16 +185,18 @@ client.on("messageCreate", async (msg)=>{
     const targetId=actionMatch[2];
     const gifFile=getActionGif(action);
 
-    const actorName=msg.author.username;
-    const targetUser=await msg.client.users.fetch(targetId);
-    const targetName=targetUser.username;
-
-    const messageText=getActionMessage(action,actorName,targetName);
+    let targetUser;
+    try { targetUser=await msg.client.users.fetch(targetId); } catch {
+      return msg.reply("I can't find that user 😅");
+    }
+    const targetName = targetUser.username;
+    const actorName = msg.author.username;
+    const messageText = getActionMessage(action,actorName,targetName);
 
     if(gifFile && fs.existsSync(`./${gifFile}`)){
-      const attachment=new AttachmentBuilder(`./${gifFile}`);
+      const attachment = new AttachmentBuilder(`./${gifFile}`);
       return msg.reply({content:messageText,files:[attachment]});
-    }else{
+    } else {
       return msg.reply(messageText);
     }
   }
@@ -228,4 +239,4 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 client.login(process.env.DISCORD_TOKEN).catch(err=>{
   console.error("Failed to login to Discord:",err);
 });
-      
+  
