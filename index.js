@@ -48,10 +48,13 @@ function safeTrackPlayer(id, username, message = "") {
   saveMemory();
 }
 
-// --- Helper: Track only valid users ---
-async function trackIfValid(user, message = "") {
-  if (!user || !user.id || !user.username) return;
-  safeTrackPlayer(user.id, user.username, message);
+// --- Absolute Safe Wrapper: trackUser ---
+function trackUser(id, username, message = "") {
+  if (typeof id !== "string" || !id || typeof username !== "string" || !username) {
+    console.warn("Skipping safeTrackPlayer: invalid id/username", { id, username });
+    return;
+  }
+  safeTrackPlayer(id, username, message);
 }
 
 // --- Detect Emotion ---
@@ -135,7 +138,7 @@ client.on("messageCreate", async msg=>{
   if(!userMsg) return msg.reply("Try saying `!chat Hey OCbot1!` 🙂");
 
   await msg.channel.sendTyping();
-  await trackIfValid(msg.author, msg.content);
+  trackUser(msg.author.id, msg.author.username, msg.content);
 
   // --- Action Commands ---
   const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
@@ -144,7 +147,7 @@ client.on("messageCreate", async msg=>{
     const targetId = actionMatch[2];
     let targetUser;
     try { targetUser = await msg.client.users.fetch(targetId); } catch { targetUser = null; }
-    if(targetUser) await trackIfValid(targetUser);
+    if(targetUser) trackUser(targetUser.id, targetUser.username);
 
     const gifFile = getActionGif(action);
     const messageText = getActionMessage(action, msg.author.username, targetUser?.username||"someone");
@@ -158,7 +161,7 @@ client.on("messageCreate", async msg=>{
   if(mentioned && /think of|opinion|feel about/i.test(userMsg)){
     let targetUser;
     try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
-    if(targetUser) await trackIfValid(targetUser);
+    if(targetUser) trackUser(targetUser.id, targetUser.username);
     const player = targetUser ? memory.players[targetUser.id] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
