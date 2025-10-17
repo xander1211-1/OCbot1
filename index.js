@@ -37,14 +37,14 @@ function saveMemory() {
   }
 }
 
-// --- Safe Track Player Wrapper ---
-function safeTrackPlayer(user, message = "") {
-  if (!user || !user.id || !user.username) {
-    console.warn("Skipping trackPlayer: invalid user object", user);
+// --- Safe Track Player (Explicit ID & Username) ---
+function safeTrackPlayer(id, username, message = "") {
+  if (!id || !username) {
+    console.warn("Skipping trackPlayer: invalid ID or username", { id, username });
     return;
   }
-  if (!memory.players[user.id]) memory.players[user.id] = { name: user.username, interactions: 0, messages: [] };
-  const p = memory.players[user.id];
+  if (!memory.players[id]) memory.players[id] = { name: username, interactions: 0, messages: [] };
+  const p = memory.players[id];
   p.interactions++;
   if (message) p.messages.push(message);
   if (p.messages.length > 50) p.messages = p.messages.slice(-50);
@@ -132,7 +132,7 @@ client.on("messageCreate", async msg=>{
   if(!userMsg) return msg.reply("Try saying `!chat Hey OCbot1!` 🙂");
 
   await msg.channel.sendTyping();
-  safeTrackPlayer(msg.author, msg.content);
+  safeTrackPlayer(msg.author.id, msg.author.username, msg.content);
 
   // --- Action Commands ---
   const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
@@ -142,7 +142,7 @@ client.on("messageCreate", async msg=>{
     if(!targetId) return msg.reply("I couldn’t find that user 😅");
     let targetUser;
     try { targetUser = await msg.client.users.fetch(targetId); } catch { return msg.reply("I can't find that user 😅"); }
-    safeTrackPlayer(targetUser);
+    if(targetUser?.id && targetUser?.username) safeTrackPlayer(targetUser.id, targetUser.username);
 
     const gifFile = getActionGif(action);
     const messageText = getActionMessage(action, msg.author.username, targetUser.username);
@@ -156,7 +156,7 @@ client.on("messageCreate", async msg=>{
   if(mentioned && /think of|opinion|feel about/i.test(userMsg)){
     let targetUser;
     try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
-    if(targetUser) safeTrackPlayer(targetUser);
+    if(targetUser?.id && targetUser?.username) safeTrackPlayer(targetUser.id, targetUser.username);
     const player = targetUser ? memory.players[targetUser.id] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
