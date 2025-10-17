@@ -37,18 +37,24 @@ function saveMemory() {
   }
 }
 
-// --- Safe Track Player (Explicit ID & Username) ---
+// --- Safe Track Player ---
 function safeTrackPlayer(id, username, message = "") {
-  if (!id || !username) {
-    console.warn("Skipping trackPlayer: invalid ID or username", { id, username });
-    return;
-  }
+  if (!id || !username) return;
   if (!memory.players[id]) memory.players[id] = { name: username, interactions: 0, messages: [] };
   const p = memory.players[id];
   p.interactions++;
   if (message) p.messages.push(message);
   if (p.messages.length > 50) p.messages = p.messages.slice(-50);
   saveMemory();
+}
+
+// --- Absolute Safe Wrapper for Any User ---
+async function trackIfValid(id, username, message = "") {
+  if (!id || !username) {
+    console.warn("Skipping trackPlayer: invalid ID/username", { id, username });
+    return;
+  }
+  safeTrackPlayer(id, username, message);
 }
 
 // --- Detect Emotion ---
@@ -60,7 +66,7 @@ function detectEmotion(text) {
   return "neutral";
 }
 
-// --- Ask AI for Chat ---
+// --- AI Chat ---
 async function askAI(userMsg) {
   const messages = [
     { role: "system", content: "You are OCbot1, a gyaru tomboy anime girl. Playful, teasing, confident, SFW." },
@@ -87,7 +93,7 @@ async function askAI(userMsg) {
   }
 }
 
-// --- Ask AI Opinion ---
+// --- AI Opinion ---
 async function askOpinion(botName, player) {
   const history = player.messages.join("\n") || "No past messages yet.";
   const prompt = `
@@ -124,28 +130,27 @@ function getActionMessage(action, actor, target){ const templates = {
 
 // --- Discord Message Handler ---
 client.on("messageCreate", async msg=>{
-  if(!msg.author?.id) return; 
-  if(msg.author.bot) return; 
+  if(!msg.author?.id) return;
+  if(msg.author.bot) return;
   if(!msg.content.startsWith("!chat") && !msg.content.startsWith("!hi")) return;
 
   const userMsg = msg.content.replace(/!chat|!hi/i,"").trim();
   if(!userMsg) return msg.reply("Try saying `!chat Hey OCbot1!` 🙂");
 
   await msg.channel.sendTyping();
-  safeTrackPlayer(msg.author.id, msg.author.username, msg.content);
+  await trackIfValid(msg.author.id, msg.author.username, msg.content);
 
   // --- Action Commands ---
   const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
   if(actionMatch){
     const action = actionMatch[1]?.toLowerCase();
     const targetId = actionMatch[2];
-    if(!targetId) return msg.reply("I couldn’t find that user 😅");
     let targetUser;
-    try { targetUser = await msg.client.users.fetch(targetId); } catch { return msg.reply("I can't find that user 😅"); }
-    if(targetUser?.id && targetUser?.username) safeTrackPlayer(targetUser.id, targetUser.username);
+    try { targetUser = await msg.client.users.fetch(targetId); } catch { targetUser = null; }
+    if(targetUser?.id && targetUser?.username) await trackIfValid(targetUser.id, targetUser.username);
 
     const gifFile = getActionGif(action);
-    const messageText = getActionMessage(action, msg.author.username, targetUser.username);
+    const messageText = getActionMessage(action, msg.author.username, targetUser?.username||"someone");
     if(gifFile && fs.existsSync(`./${gifFile}`)){
       return msg.reply({content:messageText, files:[new AttachmentBuilder(`./${gifFile}`)]});
     } else return msg.reply(messageText);
@@ -156,7 +161,7 @@ client.on("messageCreate", async msg=>{
   if(mentioned && /think of|opinion|feel about/i.test(userMsg)){
     let targetUser;
     try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
-    if(targetUser?.id && targetUser?.username) safeTrackPlayer(targetUser.id, targetUser.username);
+    if(targetUser?.id && targetUser?.username) await trackIfValid(targetUser.id, targetUser.username);
     const player = targetUser ? memory.players[targetUser.id] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
@@ -188,4 +193,3 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:",err));
-  
