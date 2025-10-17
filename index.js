@@ -1,4 +1,4 @@
-// index.js - OCbot1 Final (dedupe & send fix)
+// index.js - OCbot1 Final (Actions first, dedupe fixed)
 import fs from "fs";
 import fetch from "node-fetch";
 import express from "express";
@@ -13,30 +13,23 @@ const EXPRESS_PORT = 10000;
 // ---------- ENV ----------
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
-if (!DISCORD_TOKEN) console.error("⚠️ DISCORD_TOKEN missing!");
-if (!OPENROUTER_KEY) console.error("⚠️ OPENROUTER_API_KEY missing!");
 
 // ---------- CLIENT ----------
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
-// ---------- GLOBAL ERROR HANDLING ----------
-process.on("unhandledRejection", (err) => console.error("Unhandled promise rejection:", err));
-process.on("uncaughtException", (err) => console.error("Uncaught exception:", err));
-
 // ---------- MEMORY ----------
 let memory = { messages: [], players: {}, appearance: { description: "", notes: "" } };
 try {
   if (fs.existsSync(MEMORY_FILE)) {
     const raw = fs.readFileSync(MEMORY_FILE, "utf8");
-    const parsed = raw ? JSON.parse(raw) : null;
-    if (parsed && typeof parsed === "object") memory = parsed;
+    memory = raw ? JSON.parse(raw) : memory;
   }
 } catch (e) { console.error("Error reading memory.json:", e); }
 if (!Array.isArray(memory.messages)) memory.messages = [];
-if (!memory.players || typeof memory.players !== "object") memory.players = {};
-if (!memory.appearance || typeof memory.appearance !== "object") memory.appearance = { description: "", notes: "" };
+if (!memory.players) memory.players = {};
+if (!memory.appearance) memory.appearance = { description: "", notes: "" };
 
 function saveMemory() {
   try { fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2)); }
@@ -48,17 +41,17 @@ function safeTrackPlayer(id, username, message = "") {
   if (!id || !username) return;
   const idStr = String(id);
   if (!memory.players[idStr]) memory.players[idStr] = { name: username, interactions: 0, messages: [] };
-  memory.players[idStr].name = username;
   const p = memory.players[idStr];
-  p.interactions = (p.interactions || 0) + 1;
+  p.name = username;
+  p.interactions++;
   if (message) p.messages.push(message);
   if (p.messages.length > 30) p.messages = p.messages.slice(-30);
   saveMemory();
 }
 function trackUser(id, username, message = "") { if (!id || !username) return; safeTrackPlayer(String(id), username, message); }
 
-// ---------- FILE AUTO-DETECT ----------
-function listRepoFiles() { try { return fs.readdirSync("./").filter(f => fs.statSync(f).isFile()); } catch (e) { console.error("Failed to read repo root:", e); return []; } }
+// ---------- FILE DETECTION ----------
+function listRepoFiles() { try { return fs.readdirSync("./").filter(f => fs.statSync(f).isFile()); } catch (e) { return []; } }
 function detectEmotionImages() { return listRepoFiles().filter(f => f.toLowerCase().endsWith(".jpg") || f.toLowerCase().endsWith(".jpeg")); }
 function detectGifsByAction() {
   const files = listRepoFiles();
@@ -67,7 +60,6 @@ function detectGifsByAction() {
   for (const g of gifs) {
     const name = g.split(".gif")[0];
     const action = name.replace(/[_\-\s]+/g, "").replace(/\d+$/, "").toLowerCase();
-    if (!action) continue;
     if (!map[action]) map[action] = [];
     map[action].push(g);
   }
@@ -108,7 +100,7 @@ async function askAI(userMsg, isCreator = false) {
   } catch (e) { console.error("askAI error:", e); return "Hmm… something went wrong 😖"; }
 }
 
-// ---------- DYNAMIC COMMAND LIST ----------
+// ---------- COMMAND LIST ----------
 function buildCommandsList() {
   const actionMap = detectGifsByAction();
   const actionNames = Object.keys(actionMap).sort();
@@ -116,51 +108,46 @@ function buildCommandsList() {
   return `💬 OCbot1 Commands:
 !chat OCbot1 <message> — Talk with OCbot1
 !chat OCbot1 <action> @user — Perform an action (auto-detected from GIFs)
-!emotion <emotion> — Send a specific emotion image (by name)
+!emotion <emotion> — Send a specific emotion image
 !memory — Show memory usage and top players
 !commands — Show this list
 
 Available actions: ${actionsLine}`;
 }
 
-// ---------- SEND ONCE / DEDUP + CACHE ----------
+// ---------- SEND ONCE / DEDUPE ----------
 const recentMessages = new Set();
-const MESSAGE_TTL_MS = Number(process.env.MESSAGE_TTL_MS || 20000); // default 20s
+const MESSAGE_TTL_MS = Number(process.env.MESSAGE_TTL_MS || 20000);
 
 async function hasBotRepliedToMessage(originalMsg) {
   try {
-    if (recentMessages.has(originalMsg.id)) return true; // quick local check
+    if (recentMessages.has(originalMsg.id)) return true;
     const messages = await originalMsg.channel.messages.fetch({ limit: 50 });
     for (const m of messages.values()) {
       if (m.author?.id === client.user?.id) {
-        const refId = m.reference?.messageId || (m.reference && m.reference.messageId);
+        const refId = m.reference?.messageId;
         if (refId === originalMsg.id) return true;
       }
     }
-  } catch (e) { console.error("hasBotRepliedToMessage error:", e); }
+  } catch {}
   return false;
 }
 
 async function sendOnce(originalMsg, replyOptions) {
   const delayMs = Number(process.env.DEDUPE_DELAY_MS || 3000);
-  try {
-    if (await hasBotRepliedToMessage(originalMsg)) return null;
-    await new Promise((r) => setTimeout(r, delayMs));
-    if (await hasBotRepliedToMessage(originalMsg)) return null;
+  if (await hasBotRepliedToMessage(originalMsg)) return null;
+  await new Promise((r) => setTimeout(r, delayMs));
+  if (await hasBotRepliedToMessage(originalMsg)) return null;
 
-    // reserve only at send-time
-    recentMessages.add(originalMsg.id);
-    setTimeout(() => recentMessages.delete(originalMsg.id), MESSAGE_TTL_MS);
+  recentMessages.add(originalMsg.id);
+  setTimeout(() => recentMessages.delete(originalMsg.id), MESSAGE_TTL_MS);
 
-    return await originalMsg.reply(replyOptions);
-  } catch (e) {
-    console.error("sendOnce failed:", e);
-    try { return await originalMsg.reply(replyOptions); } catch (err) { console.error("Fallback reply failed:", err); return null; }
-  }
+  try { return await originalMsg.reply(replyOptions); } 
+  catch (e) { console.error("sendOnce failed:", e); }
 }
 
 // ---------- STARTUP APPEARANCE ----------
-if (!memory.appearance || !memory.appearance.description) {
+if (!memory.appearance.description) {
   memory.appearance = {
     description: "Short blonde hair, pink eyes, tanned skin, curvy body, wears a black cap and oversized black hoodie.",
     notes: "Tomboyish, teasing, confident voice; loyal to creator (Xander)."
@@ -172,62 +159,17 @@ if (!memory.appearance || !memory.appearance.description) {
 client.on("messageCreate", async (msg) => {
   try {
     if (!msg.author?.id || msg.author.bot || !msg.content) return;
-
     const content = msg.content.trim();
     const lc = content.toLowerCase();
 
-    // ---------- COMMAND: !commands ----------
-    if (lc.startsWith("!commands")) {
-      return await sendOnce(msg, { content: buildCommandsList() });
-    }
-
-    // ---------- COMMAND: !memory ----------
-    if (lc.startsWith("!memory")) {
-      const playerCount = Object.keys(memory.players).length;
-      const top = Object.entries(memory.players)
-        .sort((a,b)=> (b[1].interactions||0) - (a[1].interactions||0))
-        .slice(0,5)
-        .map(([id,p])=> `${p.name} (${p.interactions||0})`);
-      return await sendOnce(msg, { content: `Memory: ${playerCount} players stored.\nTop interactions: ${top.join(", ") || "none"}\nAppearance: ${memory.appearance.description}` });
-    }
-
-    // ---------- COMMAND: !emotion ----------
-    if (lc.startsWith("!emotion")) {
-      const parts = content.split(/\s+/);
-      if (parts.length < 2) return await sendOnce(msg, { content: "Usage: !emotion <name>" });
-      const want = parts[1].toLowerCase();
-      const emotions = detectEmotionImages();
-      const pick = emotions.find(e => e.toLowerCase().includes(want));
-      if (!pick) return await sendOnce(msg, { content: `No emotion image matching "${want}" found.` });
-      try {
-        const buf = fs.readFileSync(`./${pick}`);
-        return await sendOnce(msg, { files: [new AttachmentBuilder(buf, { name: pick })] });
-      } catch (e) {
-        console.error("sending emotion failed:", e);
-        return await sendOnce(msg, { content: "Could not send that emotion file." });
-      }
-    }
-
-    // ---------- CHAT / ACTIONS ----------
-    if (!(lc.startsWith("!chat") || lc.startsWith("!hi"))) return;
-
-    let userMsg = content.replace(/^!chat\s*/i,"").replace(/^!hi\s*/i,"").trim();
-    if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
-
-    const isCreator = msg.author.id === CREATOR_ID;
-    if (isCreator) userMsg = "[CREATOR] " + userMsg;
-
-    trackUser(msg.author.id, msg.author.username, msg.content);
-
-    await msg.channel.sendTyping();
-
-    // ---------- ACTION MATCH ----------
-    const actionMatch = userMsg.match(/^ocbot1\s+([a-zA-Z]+)\s*(<@!?\d+>)?/i);
+    // ---------- ACTIONS FIRST ----------
+    const actionMatch = content.match(/^!chat\s*ocbot1\s+([a-zA-Z]+)\s*(<@!?\d+>)?/i) 
+                     || content.match(/^ocbot1\s+([a-zA-Z]+)\s*(<@!?\d+>)?/i);
     const actionMap = detectGifsByAction();
     if (actionMatch) {
       const action = actionMatch[1]?.toLowerCase();
-      const mentionRaw = actionMatch[2];
       if (action && actionMap[action]) {
+        const mentionRaw = actionMatch[2];
         let targetUser = null;
         if (mentionRaw) {
           const idMatch = mentionRaw.match(/\d+/);
@@ -236,7 +178,7 @@ client.on("messageCreate", async (msg) => {
             if (targetUser) trackUser(targetUser.id, targetUser.username);
           }
         }
-        const actor = isCreator ? "Boss" : msg.author.username;
+        const actor = msg.author.id === CREATOR_ID ? "Boss" : msg.author.username;
         const targetName = targetUser ? targetUser.username : "someone";
         const templates = [
           `${actor} does a move on ${targetName}!`,
@@ -255,7 +197,18 @@ client.on("messageCreate", async (msg) => {
       }
     }
 
-    // ---------- AI REPLY ----------
+    // ---------- CHAT ----------
+    if (!(lc.startsWith("!chat") || lc.startsWith("!hi"))) return;
+
+    let userMsg = content.replace(/^!chat\s*/i,"").replace(/^!hi\s*/i,"").trim();
+    if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
+
+    const isCreator = msg.author.id === CREATOR_ID;
+    if (isCreator) userMsg = "[CREATOR] " + userMsg;
+
+    trackUser(msg.author.id, msg.author.username, msg.content);
+    await msg.channel.sendTyping();
+
     const aiReply = await askAI(userMsg, isCreator);
     const replyText = aiReply.length > 1900 ? aiReply.slice(0,1900)+"..." : aiReply;
 
@@ -277,14 +230,8 @@ client.on("messageCreate", async (msg) => {
 
 // ---------- READY ----------
 client.once("ready", async () => {
-  console.log(`✅ OCbot1 is online as ${client.user?.tag} (pid=${process.pid})`);
-  try {
-    client.user.setActivity("with anime vibes", { type: ActivityType.Playing });
-    const startupMsg = "Yo! OCbot1's up and ready to cause some chaos 😎";
-    for (const guild of client.guilds.cache.values()) {
-      try { if (guild.systemChannel) await guild.systemChannel.send(startupMsg).catch(() => {}); } catch {}
-    }
-  } catch (e) { console.error("ready hook error:", e); }
+  console.log(`✅ OCbot1 is online as ${client.user?.tag}`);
+  client.user.setActivity("with anime vibes", { type: ActivityType.Playing });
 });
 
 // ---------- EXPRESS ----------
