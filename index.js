@@ -37,11 +37,14 @@ function saveMemory() {
   }
 }
 
-// --- Safe Track Player ---
-function trackPlayer(id, name, message = "") {
-  if (!id || !name) return; // SAFETY CHECK
-  if (!memory.players[id]) memory.players[id] = { name, interactions: 0, messages: [] };
-  const p = memory.players[id];
+// --- Safe Track Player Wrapper ---
+function safeTrackPlayer(user, message = "") {
+  if (!user || !user.id || !user.username) {
+    console.warn("Skipping trackPlayer: invalid user object", user);
+    return;
+  }
+  if (!memory.players[user.id]) memory.players[user.id] = { name: user.username, interactions: 0, messages: [] };
+  const p = memory.players[user.id];
   p.interactions++;
   if (message) p.messages.push(message);
   if (p.messages.length > 50) p.messages = p.messages.slice(-50);
@@ -113,7 +116,7 @@ const actionGifs = { nom:["nom1.gif","nom2.gif"], hug:["hug1.gif","hug2.gif"], p
 function getActionGif(action){ const gifs = actionGifs[action]; if(!gifs) return null; return gifs[Math.floor(Math.random()*gifs.length)]; }
 function getActionMessage(action, actor, target){ const templates = {
   nom:[`${actor} noms on ${target} 🍴`,`${actor} bites ${target} playfully 😋`],
-  hug:[`${actor} hugs ${target} 💖`],
+  hug:[`${actor} hugs ${target} 💖`,`${actor} wraps ${target} in a warm hug 🤗`],
   pat:[`${actor} pats ${target} 🥰`],
   kiss:[`${actor} kisses ${target} 😘`],
   slap:[`${actor} slaps ${target} 😳`]
@@ -129,7 +132,7 @@ client.on("messageCreate", async msg=>{
   if(!userMsg) return msg.reply("Try saying `!chat Hey OCbot1!` 🙂");
 
   await msg.channel.sendTyping();
-  trackPlayer(msg.author.id, msg.author.username, msg.content);
+  safeTrackPlayer(msg.author, msg.content);
 
   // --- Action Commands ---
   const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
@@ -139,8 +142,7 @@ client.on("messageCreate", async msg=>{
     if(!targetId) return msg.reply("I couldn’t find that user 😅");
     let targetUser;
     try { targetUser = await msg.client.users.fetch(targetId); } catch { return msg.reply("I can't find that user 😅"); }
-    if(!targetUser?.id || !targetUser?.username) return;
-    trackPlayer(targetUser.id, targetUser.username);
+    safeTrackPlayer(targetUser);
 
     const gifFile = getActionGif(action);
     const messageText = getActionMessage(action, msg.author.username, targetUser.username);
@@ -152,9 +154,10 @@ client.on("messageCreate", async msg=>{
   // --- Player Opinion ---
   const mentioned = msg.mentions.users.first();
   if(mentioned && /think of|opinion|feel about/i.test(userMsg)){
-    if(!mentioned?.id || !mentioned?.username) return;
-    trackPlayer(mentioned.id, mentioned.username);
-    const player = memory.players[mentioned.id];
+    let targetUser;
+    try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
+    if(targetUser) safeTrackPlayer(targetUser);
+    const player = targetUser ? memory.players[targetUser.id] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
     return msg.reply(opinion);
@@ -185,4 +188,4 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:",err));
-    
+  
