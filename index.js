@@ -7,7 +7,7 @@ import { Client, GatewayIntentBits, AttachmentBuilder } from "discord.js";
 process.on("unhandledRejection", (err) => console.error("Unhandled promise rejection:", err));
 process.on("uncaughtException", (err) => console.error("Uncaught exception:", err));
 
-// --- Discord Setup ---
+// --- Discord Client ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -24,41 +24,53 @@ const MEMORY_FILE = "./memory.json";
 if (!process.env.DISCORD_TOKEN) console.error("⚠️ DISCORD_TOKEN missing!");
 if (!OPENROUTER_KEY) console.error("⚠️ OPENROUTER_API_KEY missing!");
 
-// --- Load Memory ---
+// --- Robust Memory Load & Safe Tracking ---
 let memory = { messages: [], players: {} };
-if (fs.existsSync(MEMORY_FILE)) {
-  try { memory = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8")); } catch (err) {
-    console.error("Failed to parse memory.json:", err);
+try {
+  if (fs.existsSync(MEMORY_FILE)) {
+    const raw = fs.readFileSync(MEMORY_FILE, "utf8");
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object") memory = parsed;
   }
+} catch (err) {
+  console.error("Failed to read/parse memory.json — starting fresh. Error:", err);
+  memory = { messages: [], players: {} };
 }
+
+// Ensure proper structure
+if (!memory || typeof memory !== "object") memory = { messages: [], players: {} };
+if (!Array.isArray(memory.messages)) memory.messages = [];
+if (!memory.players || typeof memory.players !== "object") memory.players = {};
+
 function saveMemory() {
-  try { fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2)); } catch (err) {
-    console.error("Failed to save memory:", err);
+  try {
+    if (!memory || typeof memory !== "object") memory = { messages: [], players: {} };
+    if (!Array.isArray(memory.messages)) memory.messages = [];
+    if (!memory.players || typeof memory.players !== "object") memory.players = {};
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
+  } catch (err) {
+    console.error("Failed to save memory.json:", err);
   }
 }
 
-// --- Safe Track Player ---
 function safeTrackPlayer(id, username, message = "") {
   if (!id || !username) return;
-  const idStr = String(id); // Force ID to string
+  const idStr = String(id); // force ID to string
   if (!memory.players[idStr]) memory.players[idStr] = { name: username, interactions: 0, messages: [] };
+  else memory.players[idStr].name = username;
   const p = memory.players[idStr];
-  p.interactions++;
+  p.interactions = (p.interactions || 0) + 1;
   if (message) p.messages.push(message);
   if (p.messages.length > 50) p.messages = p.messages.slice(-50);
   saveMemory();
 }
 
-// --- Absolute Safe Wrapper ---
 function trackUser(id, username, message = "") {
-  if (!id || !username) {
-    console.warn("Skipping safeTrackPlayer: invalid id/username", { id, username });
-    return;
-  }
-  safeTrackPlayer(id, username, message);
+  if (!id || !username) return;
+  safeTrackPlayer(String(id), username, message);
 }
 
-// --- Detect Emotion ---
+// --- Emotion Detection ---
 function detectEmotion(text) {
   const t = text.toLowerCase();
   if (t.match(/\b(happy|yay|love|good|excited|cute|sweet)\b/)) return "happy";
@@ -69,9 +81,7 @@ function detectEmotion(text) {
 
 // --- AI Chat ---
 async function askAI(userMsg) {
-  const messages = [
-    { role: "system", content: "You are OCbot1, a gyaru tomboy anime girl. Playful, teasing, confident, SFW." },
-  ];
+  const messages = [{ role: "system", content: "You are OCbot1, a gyaru tomboy anime girl. Playful, teasing, confident, SFW." }];
   const recent = memory.messages.slice(-300);
   for (const m of recent) { messages.push({ role: "user", content: m.user }); messages.push({ role: "assistant", content: m.bot }); }
   messages.push({ role: "user", content: userMsg });
@@ -131,8 +141,7 @@ function getActionMessage(action, actor, target){ const templates = {
 
 // --- Discord Message Handler ---
 client.on("messageCreate", async msg=>{
-  if(!msg.author?.id) return;
-  if(msg.author.bot) return;
+  if(!msg.author?.id || msg.author.bot) return;
   if(!msg.content.startsWith("!chat") && !msg.content.startsWith("!hi")) return;
 
   const userMsg = msg.content.replace(/!chat|!hi/i,"").trim();
@@ -194,4 +203,3 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:",err));
-                                   
