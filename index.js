@@ -205,11 +205,11 @@ client.on("messageCreate", async (msg) => {
   if (aiReply.length > 1900) aiReply = aiReply.slice(0, 1900) + "...";
 
   const emotion = detectEmotion(aiReply);
-  const emotionFile = `./${emotion}.jpeg`;
+  const emotionFile = `./${emotion}.jpg`;
 
   try {
     const file = fs.readFileSync(emotionFile);
-    const attachment = new AttachmentBuilder(file, { name: `${emotion}.jpeg` });
+    const attachment = new AttachmentBuilder(file, { name: `${emotion}.jpg` });
     await msg.reply({ content: aiReply, files: [attachment] });
   } catch {
     await msg.reply(aiReply);
@@ -229,4 +229,4 @@ app.listen(PORT, () => console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN);
-    
+                            
