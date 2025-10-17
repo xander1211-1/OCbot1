@@ -1,5 +1,4 @@
 node_modules/
-keys.json
 memory.json
+keys.json
 .env
-.DS_Store
