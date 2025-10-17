@@ -11,7 +11,7 @@ const client = new Client({
 });
 
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
-const MODEL = "mistralai/mistral-7b-instruct"; // change if you prefer another OpenRouter-hosted model
+const MODEL = "tngtech/deepseek-r1t2-chimera:free"; // change if you prefer another OpenRouter-hosted model
 
 // Shared memory file (server-wide)
 const MEMORY_FILE = "./memory.json";
