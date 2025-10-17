@@ -48,13 +48,10 @@ function safeTrackPlayer(id, username, message = "") {
   saveMemory();
 }
 
-// --- Absolute Safe Wrapper for Any User ---
-async function trackIfValid(id, username, message = "") {
-  if (!id || !username) {
-    console.warn("Skipping trackPlayer: invalid ID/username", { id, username });
-    return;
-  }
-  safeTrackPlayer(id, username, message);
+// --- Helper: Track only valid users ---
+async function trackIfValid(user, message = "") {
+  if (!user || !user.id || !user.username) return;
+  safeTrackPlayer(user.id, user.username, message);
 }
 
 // --- Detect Emotion ---
@@ -138,7 +135,7 @@ client.on("messageCreate", async msg=>{
   if(!userMsg) return msg.reply("Try saying `!chat Hey OCbot1!` 🙂");
 
   await msg.channel.sendTyping();
-  await trackIfValid(msg.author.id, msg.author.username, msg.content);
+  await trackIfValid(msg.author, msg.content);
 
   // --- Action Commands ---
   const actionMatch = userMsg.match(/ocbot1\s+(\w+)\s+<@!?(\d+)>/i);
@@ -147,7 +144,7 @@ client.on("messageCreate", async msg=>{
     const targetId = actionMatch[2];
     let targetUser;
     try { targetUser = await msg.client.users.fetch(targetId); } catch { targetUser = null; }
-    if(targetUser?.id && targetUser?.username) await trackIfValid(targetUser.id, targetUser.username);
+    if(targetUser) await trackIfValid(targetUser);
 
     const gifFile = getActionGif(action);
     const messageText = getActionMessage(action, msg.author.username, targetUser?.username||"someone");
@@ -161,7 +158,7 @@ client.on("messageCreate", async msg=>{
   if(mentioned && /think of|opinion|feel about/i.test(userMsg)){
     let targetUser;
     try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
-    if(targetUser?.id && targetUser?.username) await trackIfValid(targetUser.id, targetUser.username);
+    if(targetUser) await trackIfValid(targetUser);
     const player = targetUser ? memory.players[targetUser.id] : null;
     if(!player) return msg.reply("I don’t know that player yet 😅");
     const opinion = await askOpinion("OCbot1", player);
@@ -193,3 +190,4 @@ app.listen(PORT,()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
 client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:",err));
+  
