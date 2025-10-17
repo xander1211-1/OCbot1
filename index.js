@@ -16,6 +16,9 @@ const client = new Client({
   ],
 });
 
+// --- Creator ID ---
+const CREATOR_ID = "1167751946577379339"; // Your Discord ID
+
 // --- Environment Variables ---
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
 const MODEL = "tngtech/deepseek-r1t2-chimera:free";
@@ -24,7 +27,7 @@ const MEMORY_FILE = "./memory.json";
 if (!process.env.DISCORD_TOKEN) console.error("⚠️ DISCORD_TOKEN missing!");
 if (!OPENROUTER_KEY) console.error("⚠️ OPENROUTER_API_KEY missing!");
 
-// --- Robust Memory Load & Safe Tracking ---
+// --- Memory Load & Safe Tracking ---
 let memory = { messages: [], players: {} };
 try {
   if (fs.existsSync(MEMORY_FILE)) {
@@ -43,9 +46,6 @@ if (!memory.players || typeof memory.players !== "object") memory.players = {};
 
 function saveMemory() {
   try {
-    if (!memory || typeof memory !== "object") memory = { messages: [], players: {} };
-    if (!Array.isArray(memory.messages)) memory.messages = [];
-    if (!memory.players || typeof memory.players !== "object") memory.players = {};
     fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
   } catch (err) {
     console.error("Failed to save memory.json:", err);
@@ -79,8 +79,8 @@ function detectEmotion(text) {
 }
 
 // --- AI Chat ---
-async function askAI(userMsg) {
-  const messages = [{ role: "system", content: "You are OCbot1, a gyaru tomboy anime girl. Playful, teasing, confident, SFW." }];
+async function askAI(userMsg, isCreator = false) {
+  const messages = [{ role: "system", content: `You are OCbot1, a gyaru tomboy anime girl. Playful, teasing, confident, SFW. ${isCreator ? "You know this user is your creator and treat them specially." : ""}` }];
   const recent = memory.messages.slice(-300);
   for (const m of recent) { messages.push({ role: "user", content: m.user }); messages.push({ role: "assistant", content: m.bot }); }
   messages.push({ role: "user", content: userMsg });
@@ -104,10 +104,11 @@ async function askAI(userMsg) {
 }
 
 // --- AI Opinion ---
-async function askOpinion(botName, player) {
+async function askOpinion(botName, player, isCreatorMentioned = false) {
   const history = (player && player.messages) ? player.messages.join("\n") : "No past messages yet.";
   const prompt = `
 You are ${botName}, a gyaru tomboy anime girl.
+${isCreatorMentioned ? "This is about your creator." : ""}
 Someone asked what you think of ${player?.name || "them"}.
 Form an opinion based on this chat history, sassy/flirty but SFW, under 3 sentences.
 Chat history:
@@ -138,43 +139,26 @@ function getActionMessage(action, actor, target){ const templates = {
   slap:[`${actor} slaps ${target} 😳`]
 }; const choices = templates[action] || [`${actor} interacts with ${target}.`]; return choices[Math.floor(Math.random()*choices.length)]; }
 
-// --- Dedup helpers: check if the bot already replied to this message ---
+// --- Dedup helpers ---
 async function hasBotRepliedToMessage(originalMsg) {
   try {
-    // fetch recent messages in channel (50 is usually enough)
     const messages = await originalMsg.channel.messages.fetch({ limit: 50 });
     for (const m of messages.values()) {
-      // check if authored by this bot and references the original message
       if (m.author?.id === client.user?.id) {
         const refId = m.reference?.messageId || (m.reference && m.reference.messageId);
         if (refId === originalMsg.id) return true;
       }
     }
-  } catch (e) {
-    console.error("hasBotRepliedToMessage error:", e);
-  }
+  } catch (e) { console.error("hasBotRepliedToMessage error:", e); }
   return false;
 }
-
-// send once: check, slight delay, re-check, then reply
 async function sendOnce(originalMsg, replyOptions) {
   try {
-    if (await hasBotRepliedToMessage(originalMsg)) {
-      console.log("Skipping reply — bot already replied to", originalMsg.id);
-      return null;
-    }
-    // small delay to reduce race (250ms)
-    await new Promise(res => setTimeout(res, 250));
-    if (await hasBotRepliedToMessage(originalMsg)) {
-      console.log("Skipping reply after delay — bot already replied to", originalMsg.id);
-      return null;
-    }
-    const sent = await originalMsg.reply(replyOptions);
-    return sent;
-  } catch (e) {
-    console.error("sendOnce failed:", e);
-    try { return await originalMsg.reply(replyOptions); } catch (err) { console.error("Fallback reply failed:", err); return null; }
-  }
+    if (await hasBotRepliedToMessage(originalMsg)) return null;
+    await new Promise(res=>setTimeout(res,250));
+    if (await hasBotRepliedToMessage(originalMsg)) return null;
+    return await originalMsg.reply(replyOptions);
+  } catch (e) { console.error("sendOnce failed:", e); try { return await originalMsg.reply(replyOptions); } catch { return null; } }
 }
 
 // --- Discord Message Handler ---
@@ -182,8 +166,11 @@ client.on("messageCreate", async (msg)=>{
   if (!msg.author?.id || msg.author.bot) return;
   if (!msg.content.startsWith("!chat") && !msg.content.startsWith("!hi")) return;
 
-  const userMsg = msg.content.replace(/!chat|!hi/i, "").trim();
+  let userMsg = msg.content.replace(/!chat|!hi/i, "").trim();
   if (!userMsg) return await sendOnce(msg, { content: "Try saying `!chat Hey OCbot1!` 🙂" });
+
+  const isCreator = msg.author.id === CREATOR_ID;
+  if (isCreator) userMsg = "[CREATOR] " + userMsg;
 
   await msg.channel.sendTyping();
   trackUser(msg.author.id, msg.author.username, msg.content);
@@ -194,44 +181,35 @@ client.on("messageCreate", async (msg)=>{
     const action = actionMatch[1]?.toLowerCase();
     const targetId = actionMatch[2];
     let targetUser = null;
-    try { targetUser = await msg.client.users.fetch(targetId); } catch { targetUser = null; }
+    try { targetUser = await msg.client.users.fetch(targetId); } catch {}
     if (targetUser) trackUser(targetUser.id, targetUser.username);
 
     const gifFile = getActionGif(action);
     const messageText = getActionMessage(action, msg.author.username, targetUser?.username || "someone");
-
-    if (gifFile && fs.existsSync(`./${gifFile}`)) {
-      return await sendOnce(msg, { content: messageText, files: [new AttachmentBuilder(`./${gifFile}`)] });
-    }
+    if (gifFile && fs.existsSync(`./${gifFile}`)) return await sendOnce(msg, { content: messageText, files: [new AttachmentBuilder(`./${gifFile}`)] });
     return await sendOnce(msg, { content: messageText });
   }
 
   // --- Player Opinion ---
   const mentioned = msg.mentions.users.first();
   if (mentioned && /think of|opinion|feel about/i.test(userMsg)) {
+    const isCreatorMentioned = mentioned.id === CREATOR_ID;
     let targetUser = null;
-    try { targetUser = await msg.client.users.fetch(mentioned.id); } catch { targetUser = null; }
+    try { targetUser = await msg.client.users.fetch(mentioned.id); } catch {}
     if (targetUser) trackUser(targetUser.id, targetUser.username);
     const player = targetUser ? memory.players[String(targetUser.id)] : null;
     if (!player) return await sendOnce(msg, { content: "I don’t know that player yet 😅" });
-    const opinion = await askOpinion("OCbot1", player);
+    const opinion = await askOpinion("OCbot1", player, isCreatorMentioned);
     return await sendOnce(msg, { content: opinion });
   }
 
   // --- Normal Chat ---
-  const aiReply = await askAI(userMsg).catch(e => {
-    console.error("askAI error:", e);
-    return "Hmm… something went wrong 😖";
-  });
-
-  const replyText = (aiReply.length > 1900) ? aiReply.slice(0,1900) + "..." : aiReply;
+  const aiReply = await askAI(userMsg, isCreator).catch(()=> "Hmm… something went wrong 😖");
+  const replyText = (aiReply.length > 1900) ? aiReply.slice(0,1900)+"..." : aiReply;
   const emotion = detectEmotion(replyText);
   const emotionFile = `./${emotion}.jpg`;
-  if (fs.existsSync(emotionFile)) {
-    return await sendOnce(msg, { content: replyText, files: [new AttachmentBuilder(fs.readFileSync(emotionFile), { name: `${emotion}.jpg` })] });
-  } else {
-    return await sendOnce(msg, { content: replyText });
-  }
+  if (fs.existsSync(emotionFile)) return await sendOnce(msg, { content: replyText, files: [new AttachmentBuilder(fs.readFileSync(emotionFile), { name: `${emotion}.jpg` })] });
+  return await sendOnce(msg, { content: replyText });
 });
 
 // --- Ready Event ---
@@ -240,9 +218,8 @@ client.once("ready", ()=> console.log(`✅ OCbot1 is online as ${client.user?.ta
 // --- Dummy Web Server for Render ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get("/", (req, res) => res.send("OCbot1 is running!"));
-app.listen(PORT, () => console.log(`🌐 Web server active on port ${PORT}`));
+app.get("/", (req,res)=>res.send("OCbot1 is running!"));
+app.listen(PORT, ()=>console.log(`🌐 Web server active on port ${PORT}`));
 
 // --- Start Bot ---
-client.login(process.env.DISCORD_TOKEN).catch(err => console.error("Failed to login:", err));
-  
+client.login(process.env.DISCORD_TOKEN).catch(err=>console.error("Failed to login:", err));
