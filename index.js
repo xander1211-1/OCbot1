@@ -1,4 +1,4 @@
-// index.js - OCbot1 (updated to avoid accidental action triggers and reduce duplicate replies)
+// index.js - OCbot1 Final (dedupe & send fix)
 import fs from "fs";
 import fetch from "node-fetch";
 import express from "express";
@@ -123,9 +123,10 @@ function buildCommandsList() {
 Available actions: ${actionsLine}`;
 }
 
-// ---------- SEND ONCE / DEDUP + CACHE (IMPROVED) ----------
+// ---------- SEND ONCE / DEDUP + CACHE ----------
 const recentMessages = new Set();
 const MESSAGE_TTL_MS = Number(process.env.MESSAGE_TTL_MS || 20000); // default 20s
+
 async function hasBotRepliedToMessage(originalMsg) {
   try {
     if (recentMessages.has(originalMsg.id)) return true; // quick local check
@@ -139,15 +140,18 @@ async function hasBotRepliedToMessage(originalMsg) {
   } catch (e) { console.error("hasBotRepliedToMessage error:", e); }
   return false;
 }
+
 async function sendOnce(originalMsg, replyOptions) {
-  const delayMs = Number(process.env.DEDUPE_DELAY_MS || 3000); // default 3s
+  const delayMs = Number(process.env.DEDUPE_DELAY_MS || 3000);
   try {
     if (await hasBotRepliedToMessage(originalMsg)) return null;
     await new Promise((r) => setTimeout(r, delayMs));
     if (await hasBotRepliedToMessage(originalMsg)) return null;
-    // mark locally as handled to stop same-instance duplicate processing after reply
+
+    // reserve only at send-time
     recentMessages.add(originalMsg.id);
     setTimeout(() => recentMessages.delete(originalMsg.id), MESSAGE_TTL_MS);
+
     return await originalMsg.reply(replyOptions);
   } catch (e) {
     console.error("sendOnce failed:", e);
@@ -164,15 +168,10 @@ if (!memory.appearance || !memory.appearance.description) {
   saveMemory();
 }
 
-// ---------- MESSAGE HANDLER (immediate reservation + restricted action matching) ----------
+// ---------- MESSAGE HANDLER ----------
 client.on("messageCreate", async (msg) => {
   try {
     if (!msg.author?.id || msg.author.bot || !msg.content) return;
-
-    // immediate per-process reservation to avoid double-processing inside same instance
-    if (recentMessages.has(msg.id)) return;
-    recentMessages.add(msg.id);
-    setTimeout(() => recentMessages.delete(msg.id), MESSAGE_TTL_MS);
 
     const content = msg.content.trim();
     const lc = content.toLowerCase();
@@ -210,7 +209,6 @@ client.on("messageCreate", async (msg) => {
     }
 
     // ---------- CHAT / ACTIONS ----------
-    // Only proceed if message explicitly uses the bot command prefixes (avoids accidental triggers)
     if (!(lc.startsWith("!chat") || lc.startsWith("!hi"))) return;
 
     let userMsg = content.replace(/^!chat\s*/i,"").replace(/^!hi\s*/i,"").trim();
@@ -219,14 +217,11 @@ client.on("messageCreate", async (msg) => {
     const isCreator = msg.author.id === CREATOR_ID;
     if (isCreator) userMsg = "[CREATOR] " + userMsg;
 
-    // Track user memory
     trackUser(msg.author.id, msg.author.username, msg.content);
 
-    // Send typing indicator
     await msg.channel.sendTyping();
 
-    // ---------- ACTION MATCH: only explicit "ocbot1 <action>" at start ----------
-    // require the token "ocbot1" at the start of the chat content for actions
+    // ---------- ACTION MATCH ----------
     const actionMatch = userMsg.match(/^ocbot1\s+([a-zA-Z]+)\s*(<@!?\d+>)?/i);
     const actionMap = detectGifsByAction();
     if (actionMatch) {
@@ -299,4 +294,4 @@ app.listen(EXPRESS_PORT, ()=>console.log(`🌐 Express listening on port ${EXPRE
 
 // ---------- LOGIN ----------
 client.login(DISCORD_TOKEN).catch(e=>console.error("Failed to login:", e));
-    
+  
