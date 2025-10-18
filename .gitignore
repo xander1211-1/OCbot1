@@ -1,5 +1,2 @@
 node_modules/
-memory.json
-keys.json
-voicekeys.json
 .env
