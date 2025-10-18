@@ -11,27 +11,26 @@ const client = new Client({
   ],
 });
 
+// === Constants ===
 const MEMORY_FILE = "./memory.json";
 const KEYS_FILE = "./keys.json";
 const ACTIONS_FOLDER = "./actions";
-const EMOTIONS_FOLDER = "./emotions";
 const DAILY_LIMIT = 50;
+const PORT = process.env.PORT || 10000;
 
-// === Load memory and keys ===
-let memory = { messages: [], players: {}, appearance: {} };
-let userKeys = {};
-try {
-  if (fs.existsSync(MEMORY_FILE)) memory = JSON.parse(fs.readFileSync(MEMORY_FILE));
-  if (fs.existsSync(KEYS_FILE)) userKeys = JSON.parse(fs.readFileSync(KEYS_FILE));
-} catch (err) {
-  console.error("Error reading files:", err);
-}
+// === Ensure Files Exist ===
+if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({ messages: [] }, null, 2));
+if (!fs.existsSync(KEYS_FILE)) fs.writeFileSync(KEYS_FILE, JSON.stringify({}, null, 2));
 
-// === Save helpers ===
+// === Load Files ===
+let memory = JSON.parse(fs.readFileSync(MEMORY_FILE));
+let userKeys = JSON.parse(fs.readFileSync(KEYS_FILE));
+
+// === Save Helpers ===
 const saveMemory = () => fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
 const saveKeys = () => fs.writeFileSync(KEYS_FILE, JSON.stringify(userKeys, null, 2));
 
-// === Reset daily usage ===
+// === Reset Daily Limits ===
 function resetDailyCounts() {
   const today = new Date().toDateString();
   let changed = false;
@@ -46,185 +45,159 @@ function resetDailyCounts() {
 }
 setInterval(resetDailyCounts, 60 * 60 * 1000);
 
-// === Small cache to prevent double replies ===
-const recentMessages = new Set();
-function addRecent(id) {
-  recentMessages.add(id);
-  setTimeout(() => recentMessages.delete(id), 15000); // 15s cache
-}
+// === Anti-Duplicate Protection ===
+let listenerAttached = false;
+const processingMessages = new Set();
 
-// === Random file helper ===
-function randomFile(folderPath, type = ".gif") {
+// === Helper: pick random gif ===
+function randomFile(folder) {
   try {
-    const files = fs.readdirSync(folderPath).filter(f => f.endsWith(type));
-    if (!files || files.length === 0) return null;
-    return `${folderPath}/${files[Math.floor(Math.random() * files.length)]}`;
+    const files = fs.readdirSync(folder).filter(f => f.endsWith(".gif"));
+    if (files.length === 0) return null;
+    return `${folder}/${files[Math.floor(Math.random() * files.length)]}`;
   } catch {
     return null;
   }
 }
 
-// === AI response ===
-async function getAIResponse(message, userKey, username) {
+// === AI Reply ===
+async function getAIResponse(msg, key, username) {
   try {
-    const body = {
+    const payload = {
       model: "tngtech/deepseek-r1t2-chimera:free",
       messages: [
         {
           role: "system",
           content:
-            "You are OCbot1, a tomboyish gyaru anime girl with short blonde hair, pink eyes, tanned skin, and a black hoodie. You are teasing but caring, with a playful tone. Speak casually, like a tomboy friend.",
+            "You are OCbot1, a tomboyish gyaru with short blonde hair, pink eyes, tanned skin, and an oversized black hoodie. Speak casually, tease lightly, and act like a cool tomboy friend.",
         },
         ...memory.messages.slice(-20),
-        { role: "user", content: `${username}: ${message}` },
+        { role: "user", content: `${username}: ${msg}` },
       ],
     };
 
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${userKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
-      console.error("OpenRouter API error:", res.status);
-      return "Hmm… something went wrong 😖";
+      console.error("API error:", res.status);
+      return "Hmm... something went wrong.";
     }
 
     const data = await res.json();
-    const reply = data?.choices?.[0]?.message?.content;
-    if (!reply) return "Hmm… something went wrong 😖";
-
+    const reply = data?.choices?.[0]?.message?.content || "Uhh... my brain blanked out.";
     memory.messages.push({ role: "assistant", content: reply });
     if (memory.messages.length > 300) memory.messages = memory.messages.slice(-300);
     saveMemory();
     return reply;
-  } catch (error) {
-    console.error("AI error:", error);
+  } catch (err) {
+    console.error("AI Error:", err);
     return "Uhh... my brain blanked out.";
   }
 }
 
-// === Command handler ===
-client.on("messageCreate", async (msg) => {
-  try {
-    if (msg.author.bot || !msg.content) return;
-    if (recentMessages.has(msg.id)) return;
-    addRecent(msg.id);
+// === COMMAND HANDLER ===
+function attachListenerOnce() {
+  if (listenerAttached) return; // Prevent duplicate listener
+  listenerAttached = true;
 
-    const content = msg.content.trim();
-    const userId = msg.author.id;
-    const lc = content.toLowerCase();
+  client.on("messageCreate", async (msg) => {
+    try {
+      if (msg.author.bot || !msg.content) return;
+      const userId = msg.author.id;
+      const content = msg.content.trim();
+      const lc = content.toLowerCase();
 
-    // --- KEY COMMANDS ---
-    if (lc.startsWith("!key ")) {
-      const parts = content.split(/\s+/);
-      const key = parts[1];
-      if (!key || !key.startsWith("sk-")) {
-        return msg.reply("❌ Invalid key format. Must start with `sk-`.");
-      }
-      userKeys[userId] = { apiKey: key, messagesUsed: 0, lastReset: new Date().toDateString() };
-      saveKeys();
-      return msg.reply("✅ Key saved! You can now use `!chat <message>` to talk to me.");
-    }
+      // === prevent re-entry ===
+      if (processingMessages.has(msg.id)) return;
+      processingMessages.add(msg.id);
+      setTimeout(() => processingMessages.delete(msg.id), 10000);
 
-    if (lc === "!delkey") {
-      if (userKeys[userId]) {
-        delete userKeys[userId];
+      // === !key command ===
+      if (lc.startsWith("!key ")) {
+        const key = content.split(/\s+/)[1];
+        if (!key?.startsWith("sk-")) return msg.reply("❌ Invalid key format.");
+        userKeys[userId] = { apiKey: key, messagesUsed: 0, lastReset: new Date().toDateString() };
         saveKeys();
-        return msg.reply("🗝️ Your key has been deleted.");
-      }
-      return msg.reply("You don’t have a saved key.");
-    }
-
-    if (lc === "!info") {
-      const k = userKeys[userId];
-      if (!k) return msg.reply("🔑 Use `!key <yourkey>` first.");
-      const used = k.messagesUsed || 0;
-      const remaining = Math.max(DAILY_LIMIT - used, 0);
-      return msg.reply(`💬 You've used **${used}** messages today. You have **${remaining}** left.`);
-    }
-
-    if (lc === "!commands") {
-      return msg.reply(
-        "**OCbot1 Commands**\n" +
-          "`!chat <message>` — Talk to OCbot1\n" +
-          "`!key <key>` — Register your OpenRouter key\n" +
-          "`!info` — Shows used & remaining messages\n" +
-          "`!delkey` — Delete your key\n" +
-          "`!bonk @user` / `!kiss @user` — Actions\n" +
-          "`!memory` — Memory stats"
-      );
-    }
-
-    if (lc === "!memory") {
-      return msg.reply(
-        `🧠 Memory size: ${memory.messages.length} messages. Tracked players: ${Object.keys(memory.players).length}`
-      );
-    }
-
-    // --- ACTION COMMANDS ---
-    if (lc.startsWith("!bonk") || lc.startsWith("!kiss")) {
-      const mentioned = msg.mentions.users.first();
-      const actionType = lc.startsWith("!bonk") ? "bonk" : "kiss";
-      const gifFile = randomFile(ACTIONS_FOLDER, ".gif");
-      const replyText = mentioned
-        ? `*${msg.author.username} ${actionType}s ${mentioned.username}!*`
-        : `*${msg.author.username} ${actionType}s the air!*`;
-
-      if (gifFile) {
-        await msg.channel.send({ content: replyText, files: [gifFile] });
-      } else {
-        await msg.reply(`${replyText} (No GIF found.)`);
-      }
-      return;
-    }
-
-    // --- CHAT COMMAND ---
-    if (lc.startsWith("!chat") || lc.startsWith("!hi")) {
-      const userKeyData = userKeys[userId];
-      if (!userKeyData) {
-        return msg.reply("🔑 Please register your key first with `!key <yourkey>`.");
+        return msg.reply("✅ Your key was saved!");
       }
 
-      const today = new Date().toDateString();
-      if (userKeyData.lastReset !== today) {
-        userKeyData.messagesUsed = 0;
-        userKeyData.lastReset = today;
+      // === !info ===
+      if (lc === "!info") {
+        const k = userKeys[userId];
+        if (!k) return msg.reply("🔑 You haven’t added a key yet. Use `!key <yourkey>` first.");
+        const used = k.messagesUsed || 0;
+        const left = Math.max(DAILY_LIMIT - used, 0);
+        return msg.reply(`💬 You've used **${used}** messages today. You have **${left}** left.`);
       }
 
-      if ((userKeyData.messagesUsed || 0) >= DAILY_LIMIT) {
-        return msg.reply(`🚫 You've hit the ${DAILY_LIMIT} message limit for today.`);
+      // === !commands ===
+      if (lc === "!commands") {
+        return msg.reply(
+          "**OCbot1 Commands:**\n" +
+            "`!key <key>` — Add your OpenRouter key\n" +
+            "`!info` — Check your usage\n" +
+            "`!chat <message>` — Talk to OCbot1\n" +
+            "`!bonk @user` / `!kiss @user` — Fun actions"
+        );
       }
 
-      const userMessage = content.replace(/^!chat\s*/i, "").replace(/^!hi\s*/i, "").trim();
-      if (!userMessage) return msg.reply("What do you want to say?");
+      // === !bonk or !kiss ===
+      if (lc.startsWith("!bonk") || lc.startsWith("!kiss")) {
+        const type = lc.startsWith("!bonk") ? "bonk" : "kiss";
+        const gif = randomFile(ACTIONS_FOLDER);
+        const mentioned = msg.mentions.users.first();
+        const replyText = mentioned
+          ? `*${msg.author.username} ${type}s ${mentioned.username}!*`
+          : `*${msg.author.username} ${type}s the air!*`;
+        return gif
+          ? msg.channel.send({ content: replyText, files: [gif] })
+          : msg.reply(`${replyText} (No GIF found.)`);
+      }
 
-      await msg.channel.sendTyping();
-      const aiReply = await getAIResponse(userMessage, userKeyData.apiKey, msg.author.username);
-      await msg.reply(aiReply);
+      // === !chat ===
+      if (lc.startsWith("!chat")) {
+        const k = userKeys[userId];
+        if (!k) return msg.reply("🔑 Please register your key first with `!key <yourkey>`.");
 
-      userKeyData.messagesUsed = (userKeyData.messagesUsed || 0) + 1;
-      saveKeys();
+        const today = new Date().toDateString();
+        if (k.lastReset !== today) {
+          k.messagesUsed = 0;
+          k.lastReset = today;
+        }
+
+        if (k.messagesUsed >= DAILY_LIMIT)
+          return msg.reply(`🚫 You’ve hit your ${DAILY_LIMIT} message limit for today.`);
+
+        const text = content.replace(/^!chat\s*/i, "").trim();
+        if (!text) return msg.reply("What do you want to say?");
+        await msg.channel.sendTyping();
+
+        const reply = await getAIResponse(text, k.apiKey, msg.author.username);
+        await msg.reply(reply);
+
+        k.messagesUsed++;
+        saveKeys();
+      }
+    } catch (err) {
+      console.error("Handler error:", err);
     }
-  } catch (err) {
-    console.error("Handler error:", err);
-  }
-});
+  });
+}
 
-// === Ready Event ===
+attachListenerOnce();
+
 client.once("ready", () => {
   console.log(`✅ OCbot1 is online as ${client.user.tag}`);
 });
 
-// === Dummy Express Server ===
+// === Dummy Express Server (for Render) ===
 const app = express();
 app.get("/", (req, res) => res.send("OCbot1 is alive!"));
-const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🌐 Listening on port ${PORT}`));
 
-client.login(process.env.TOKEN).catch(e => console.error("Login failed:", e));
-    
+client.login(process.env.TOKEN);
+      
