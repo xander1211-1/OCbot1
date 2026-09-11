@@ -1,0 +1,16 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.tpquestvr.launcher'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'dev.tpquestvr.launcher'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+    }
+}
